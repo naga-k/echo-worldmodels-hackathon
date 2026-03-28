@@ -1,10 +1,11 @@
 import os
 import json
 import asyncio
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
-import anthropic
+from google import genai
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +15,28 @@ from pydantic import BaseModel
 # Load env from parent directory's .env
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-app = FastAPI(title="Echo API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    missing = []
+    if not os.getenv("GEMINI_API_KEY"):
+        missing.append("GEMINI_API_KEY")
+    if not os.getenv("ELEVEN_LABS_API"):
+        missing.append("ELEVEN_LABS_API")
+    if not os.getenv("WORLD_LABS_API_KEY"):
+        missing.append("WORLD_LABS_API_KEY")
+    if missing:
+        print(f"\n⚠️  Missing env vars: {', '.join(missing)}")
+        print("   Some endpoints will return errors. Check your .env file.\n")
+    yield
+
+
+app = FastAPI(
+    title="Echo API",
+    version="0.1.0",
+    description="Backend for Echo — paste a story, step inside it. Extracts scenes via Claude, generates 3D worlds via World Labs Marble, and narration audio via ElevenLabs.",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,7 +46,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ELEVEN_LABS_API = os.getenv("ELEVEN_LABS_API", "")
 WORLD_LABS_API_KEY = os.getenv("WORLD_LABS_API_KEY", "")
 
@@ -33,7 +55,7 @@ ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
 # ElevenLabs "Adam" voice - good narrative voice
 ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"
 
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 # ─── Models ───
@@ -41,9 +63,30 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 class ExtractRequest(BaseModel):
     text: str
 
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "text": "The detective's office was dimly lit, rain streaking down the window. He stepped outside into the narrow alley, neon signs reflecting off wet cobblestones."
+                }
+            ]
+        }
+    }
+
 class SpeechRequest(BaseModel):
     text: str
     voice_id: Optional[str] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "text": "The rain had not stopped for three days. From the window of his office, the detective watched the city drown.",
+                    "voice_id": None,
+                }
+            ]
+        }
+    }
 
 class ScenePrompt(BaseModel):
     id: str
@@ -51,6 +94,21 @@ class ScenePrompt(BaseModel):
 
 class GenerateWorldsRequest(BaseModel):
     scenes: list[ScenePrompt]
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "scenes": [
+                        {
+                            "id": "scene_1",
+                            "marble_prompt": "Dimly lit 1940s private detective office with a heavy oak desk, brass desk lamp, venetian blinds, rain-streaked window, whiskey bottle on the desk corner, wooden filing cabinets, worn leather chair, checkered linoleum floor.",
+                        }
+                    ]
+                }
+            ]
+        }
+    }
 
 
 # ─── POST /extract-scenes ───
@@ -97,38 +155,24 @@ Important:
 """
 
 
-@app.post("/extract-scenes")
+@app.post("/extract-scenes", tags=["Pipeline"], summary="Extract scenes from story text",
+           description="Uses Gemini to decompose input text into 2-5 distinct physical scenes with Marble-optimized prompts, timestamps, and camera directions.")
 async def extract_scenes(req: ExtractRequest):
     if not req.text.strip():
         raise HTTPException(400, "Text is required")
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
+    if not gemini_client:
+        raise HTTPException(500, "GEMINI_API_KEY not configured")
 
     try:
-        message = claude_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"{EXTRACTION_PROMPT}\n\nInput text:\n{req.text}",
-                }
-            ],
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"{EXTRACTION_PROMPT}\n\nInput text:\n{req.text}",
+            config={
+                "response_mime_type": "application/json",
+            },
         )
 
-        content = message.content[0]
-        if content.type != "text":
-            raise HTTPException(500, "Unexpected response type from Claude")
-
-        # Parse the JSON response
-        raw = content.text.strip()
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[: raw.rfind("```")]
-            raw = raw.strip()
-
+        raw = response.text.strip()
         result = json.loads(raw)
 
         # Validate structure
@@ -140,14 +184,15 @@ async def extract_scenes(req: ExtractRequest):
         return result
 
     except json.JSONDecodeError as e:
-        raise HTTPException(500, f"Failed to parse Claude response as JSON: {e}")
-    except anthropic.APIError as e:
-        raise HTTPException(500, f"Claude API error: {e}")
+        raise HTTPException(500, f"Failed to parse Gemini response as JSON: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Gemini API error: {e}")
 
 
 # ─── POST /generate-speech ───
 
-@app.post("/generate-speech")
+@app.post("/generate-speech", tags=["Pipeline"], summary="Generate narration audio",
+           description="Converts text to speech using ElevenLabs API. Returns MP3 audio bytes.")
 async def generate_speech(req: SpeechRequest):
     if not req.text.strip():
         raise HTTPException(400, "Text is required")
@@ -224,7 +269,8 @@ async def _generate_single_world(
     return {"scene_id": scene_id, "operation_id": operation_id}
 
 
-@app.post("/generate-worlds")
+@app.post("/generate-worlds", tags=["Pipeline"], summary="Generate 3D worlds for all scenes",
+           description="Fires parallel Marble API requests for each scene. Returns operation IDs for polling.")
 async def generate_worlds(req: GenerateWorldsRequest):
     if not req.scenes:
         raise HTTPException(400, "At least one scene is required")
@@ -277,7 +323,8 @@ def _extract_spz_url(data: dict) -> Optional[str]:
     return None
 
 
-@app.get("/poll-worlds")
+@app.get("/poll-worlds", tags=["Pipeline"], summary="Poll world generation status",
+         description="Checks status of one or more Marble generation operations. Returns status and SPZ URLs for completed worlds.")
 async def poll_worlds(operation_ids: str):
     if not operation_ids.strip():
         raise HTTPException(400, "operation_ids query parameter is required")
@@ -332,12 +379,13 @@ async def poll_worlds(operation_ids: str):
 
 # ─── Health check ───
 
-@app.get("/health")
+@app.get("/health", tags=["System"], summary="Health check",
+         description="Returns API status and which API keys are configured.")
 async def health():
     return {
         "status": "ok",
         "apis": {
-            "claude": bool(ANTHROPIC_API_KEY),
+            "gemini": bool(GEMINI_API_KEY),
             "elevenlabs": bool(ELEVEN_LABS_API),
             "worldlabs": bool(WORLD_LABS_API_KEY),
         },
