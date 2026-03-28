@@ -19,13 +19,8 @@ export default function SceneViewer({ spzUrl }: SceneViewerProps) {
     async function init() {
       const container = containerRef.current!;
 
-      // Load Spark.js via CDN to bypass webpack's asset module issues
-      const cdnUrl =
-        "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@0.1.10/dist/spark.module.js";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const spark: any = await (Function(
-        `return import("${cdnUrl}")`
-      )() as Promise<any>);
+      // Dynamic import to avoid SSR issues
+      const { SparkRenderer, SplatMesh } = await import("@sparkjsdev/spark");
 
       if (cancelled) return;
 
@@ -46,11 +41,11 @@ export default function SceneViewer({ spzUrl }: SceneViewerProps) {
       container.appendChild(renderer.domElement);
 
       // SparkRenderer is a THREE.Mesh that manages splat rendering
-      const sparkRenderer = new spark.SparkRenderer({ renderer });
+      const sparkRenderer = new SparkRenderer({ renderer });
       scene.add(sparkRenderer);
 
-      // Load SPZ file
-      const splatMesh = new spark.SplatMesh({ url: spzUrl });
+      // Load SPZ file via SplatMesh constructor
+      const splatMesh = new SplatMesh({ url: spzUrl });
       await splatMesh.initialized;
       scene.add(splatMesh);
 
