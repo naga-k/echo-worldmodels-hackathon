@@ -118,6 +118,7 @@ EXTRACTION_PROMPT = """You are a story-to-3D-world decomposer for the "Echo" exp
 For each scene, produce:
 - id: "scene_1", "scene_2", etc.
 - title: Short descriptive name (3-5 words)
+- source_ref: If the input text contains chapter numbers, page numbers, section headers, act/scene labels, episode numbers, or any structural markers, include them here (e.g., "Chapter 3", "Page 42", "Act II Scene 1", "Episode 4 - 12:30"). If no structural markers exist, set to null.
 - marble_prompt: A prompt optimized for 3D world generation with World Labs Marble API. Be CONCRETE and PHYSICAL. Describe: the space layout, key objects and furniture with positions, materials and textures, colors, lighting conditions (direction, color, intensity), architectural features (walls, floors, ceiling, windows, doors). Do NOT include emotions, abstract concepts, character actions, or narrative. Think "what would a camera see?" Example good prompt: "Dimly lit 1940s private detective office with a heavy oak desk centered in the room, brass desk lamp casting warm light, venetian blinds on a tall window with rain streaks, whiskey bottle and glass on the desk corner, wooden filing cabinets against the wall, worn leather chair, ceiling fan, checkered linoleum floor." Example bad prompt: "A room filled with decades of secrets and the weight of unsolved cases."
 - narration_text: The portion of the original input text that corresponds to this scene. Use the original wording.
 - time_start: Fractional start time (0.0 to 1.0) representing when this scene starts in the narration
@@ -137,6 +138,7 @@ Return ONLY valid JSON with this exact structure, no markdown, no explanation:
     {
       "id": "scene_1",
       "title": "...",
+      "source_ref": "Chapter 3" or null,
       "marble_prompt": "...",
       "narration_text": "...",
       "time_start": 0.0,
