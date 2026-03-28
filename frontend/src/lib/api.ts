@@ -23,11 +23,11 @@ export async function generateSpeech(text: string): Promise<string> {
   return URL.createObjectURL(blob);
 }
 
-export async function generateWorlds(scenes: { id: string; marble_prompt: string }[]): Promise<GenerateWorldsResponse> {
+export async function generateWorlds(scenes: { id: string; marble_prompt: string }[], model: string = "Marble 0.1-mini"): Promise<GenerateWorldsResponse> {
   const res = await fetch(`${API_URL}/generate-worlds`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scenes }),
+    body: JSON.stringify({ scenes, model }),
   });
   if (!res.ok) throw new Error("Failed to generate worlds");
   return res.json();

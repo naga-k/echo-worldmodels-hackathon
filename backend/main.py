@@ -144,6 +144,7 @@ class ScenePrompt(BaseModel):
 
 class GenerateWorldsRequest(BaseModel):
     scenes: list[ScenePrompt]
+    model: Optional[str] = "Marble 0.1-mini"  # "Marble 0.1-mini" or "Marble 0.1-plus"
 
     model_config = {
         "json_schema_extra": {
@@ -154,7 +155,8 @@ class GenerateWorldsRequest(BaseModel):
                             "id": "scene_1",
                             "marble_prompt": "Dimly lit 1940s private detective office with a heavy oak desk, brass desk lamp, venetian blinds, rain-streaked window, whiskey bottle on the desk corner, wooden filing cabinets, worn leather chair, checkered linoleum floor.",
                         }
-                    ]
+                    ],
+                    "model": "Marble 0.1-mini",
                 }
             ]
         }
@@ -304,7 +306,7 @@ async def generate_speech(req: SpeechRequest):
 # ─── POST /generate-worlds ───
 
 async def _generate_single_world(
-    client: httpx.AsyncClient, scene_id: str, marble_prompt: str
+    client: httpx.AsyncClient, scene_id: str, marble_prompt: str, model: str = "Marble 0.1-mini"
 ) -> dict:
     """Fire a single Marble world generation request."""
     response = await client.post(
@@ -319,7 +321,7 @@ async def _generate_single_world(
                 "type": "text",
                 "text_prompt": marble_prompt,
             },
-            "model": "Marble 0.1-mini",
+            "model": model,
         },
     )
 
@@ -352,9 +354,10 @@ async def generate_worlds(req: GenerateWorldsRequest):
     if cached:
         return cached
 
+    model = req.model or "Marble 0.1-mini"
     async with httpx.AsyncClient(timeout=120.0) as client:
         tasks = [
-            _generate_single_world(client, scene.id, scene.marble_prompt)
+            _generate_single_world(client, scene.id, scene.marble_prompt, model)
             for scene in req.scenes
         ]
         results = await asyncio.gather(*tasks)

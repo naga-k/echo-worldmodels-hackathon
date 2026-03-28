@@ -81,7 +81,7 @@ const Experience = () => {
       {/* 3D Viewer */}
       <div className="absolute inset-0">
         {activeScene?.spz_url ? (
-          <SceneViewer spzUrl={activeScene.spz_url} />
+          <SceneViewer spzUrl={activeScene.spz_url} showDebug={true} />
         ) : (
           <div className="flex items-center justify-center h-full">
             <p className="text-2xl font-display text-foreground/60">Loading world: {activeScene?.title}</p>
