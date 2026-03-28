@@ -1,7 +1,9 @@
 import os
 import json
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -14,6 +16,54 @@ from pydantic import BaseModel
 
 # Load env from parent directory's .env
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+# ─── File-based cache ───
+# Caches API responses to disk so repeated calls during dev are instant.
+# Set CACHE_ENABLED=false in .env to disable.
+
+CACHE_DIR = Path(os.path.dirname(__file__)) / ".cache"
+CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() != "false"
+
+
+def _cache_key(*parts: str) -> str:
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def cache_get_json(prefix: str, key: str) -> Optional[dict]:
+    if not CACHE_ENABLED:
+        return None
+    path = CACHE_DIR / f"{prefix}_{key}.json"
+    if path.exists():
+        print(f"  [cache hit] {prefix}_{key}")
+        return json.loads(path.read_text())
+    return None
+
+
+def cache_set_json(prefix: str, key: str, data: dict):
+    if not CACHE_ENABLED:
+        return
+    CACHE_DIR.mkdir(exist_ok=True)
+    path = CACHE_DIR / f"{prefix}_{key}.json"
+    path.write_text(json.dumps(data))
+
+
+def cache_get_bytes(prefix: str, key: str) -> Optional[bytes]:
+    if not CACHE_ENABLED:
+        return None
+    path = CACHE_DIR / f"{prefix}_{key}.bin"
+    if path.exists():
+        print(f"  [cache hit] {prefix}_{key}")
+        return path.read_bytes()
+    return None
+
+
+def cache_set_bytes(prefix: str, key: str, data: bytes):
+    if not CACHE_ENABLED:
+        return
+    CACHE_DIR.mkdir(exist_ok=True)
+    path = CACHE_DIR / f"{prefix}_{key}.bin"
+    path.write_bytes(data)
 
 
 @asynccontextmanager
@@ -165,9 +215,16 @@ async def extract_scenes(req: ExtractRequest):
     if not gemini_client:
         raise HTTPException(500, "GEMINI_API_KEY not configured")
 
+    key = _cache_key(req.text)
+    cached = cache_get_json("extract", key)
+    if cached:
+        return cached
+
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+        # Run sync Gemini client in thread pool to avoid blocking event loop
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model="gemini-3-flash-preview",
             contents=f"{EXTRACTION_PROMPT}\n\nInput text:\n{req.text}",
             config={
                 "response_mime_type": "application/json",
@@ -183,6 +240,7 @@ async def extract_scenes(req: ExtractRequest):
         if len(result["scenes"]) == 0:
             raise HTTPException(500, "No scenes extracted from text")
 
+        cache_set_json("extract", key, result)
         return result
 
     except json.JSONDecodeError as e:
@@ -202,6 +260,14 @@ async def generate_speech(req: SpeechRequest):
         raise HTTPException(501, "ELEVEN_LABS_API not configured")
 
     voice_id = req.voice_id or ELEVENLABS_VOICE_ID
+    key = _cache_key(req.text, voice_id)
+    cached = cache_get_bytes("speech", key)
+    if cached:
+        return Response(
+            content=cached,
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "inline; filename=narration.mp3"},
+        )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
@@ -227,6 +293,7 @@ async def generate_speech(req: SpeechRequest):
                 f"ElevenLabs API error: {response.text}",
             )
 
+        cache_set_bytes("speech", key, response.content)
         return Response(
             content=response.content,
             media_type="audio/mpeg",
@@ -279,6 +346,12 @@ async def generate_worlds(req: GenerateWorldsRequest):
     if not WORLD_LABS_API_KEY:
         raise HTTPException(500, "WORLD_LABS_API_KEY not configured")
 
+    # Cache key based on all marble prompts
+    key = _cache_key(*[s.marble_prompt for s in req.scenes])
+    cached = cache_get_json("worlds", key)
+    if cached:
+        return cached
+
     async with httpx.AsyncClient(timeout=120.0) as client:
         tasks = [
             _generate_single_world(client, scene.id, scene.marble_prompt)
@@ -286,7 +359,9 @@ async def generate_worlds(req: GenerateWorldsRequest):
         ]
         results = await asyncio.gather(*tasks)
 
-    return {"operations": results}
+    result = {"operations": results}
+    cache_set_json("worlds", key, result)
+    return result
 
 
 # ─── GET /poll-worlds ───
@@ -335,6 +410,12 @@ async def poll_worlds(operation_ids: str):
 
     ids = [oid.strip() for oid in operation_ids.split(",") if oid.strip()]
 
+    # Return cached result if all scenes were already done
+    key = _cache_key(*sorted(ids))
+    cached = cache_get_json("poll", key)
+    if cached:
+        return cached
+
     async with httpx.AsyncClient(timeout=30.0) as client:
 
         async def poll_one(operation_id: str) -> dict:
@@ -376,22 +457,41 @@ async def poll_worlds(operation_ids: str):
 
         results = await asyncio.gather(*[poll_one(oid) for oid in ids])
 
-    return {"scenes": results}
+    result = {"scenes": results}
+    # Only cache when all scenes are done (ready or failed)
+    all_done = all(r["status"] in ("ready", "failed") for r in results)
+    if all_done:
+        cache_set_json("poll", key, result)
+    return result
 
 
-# ─── Health check ───
+# ─── System ───
 
 @app.get("/health", tags=["System"], summary="Health check",
          description="Returns API status and which API keys are configured.")
 async def health():
+    cache_files = list(CACHE_DIR.glob("*")) if CACHE_DIR.exists() else []
     return {
         "status": "ok",
+        "cache_enabled": CACHE_ENABLED,
+        "cache_entries": len(cache_files),
         "apis": {
             "gemini": bool(GEMINI_API_KEY),
             "elevenlabs": bool(ELEVEN_LABS_API),
             "worldlabs": bool(WORLD_LABS_API_KEY),
         },
     }
+
+
+@app.delete("/cache", tags=["System"], summary="Clear cache",
+            description="Deletes all cached API responses.")
+async def clear_cache():
+    if not CACHE_DIR.exists():
+        return {"cleared": 0}
+    files = list(CACHE_DIR.glob("*"))
+    for f in files:
+        f.unlink()
+    return {"cleared": len(files)}
 
 
 if __name__ == "__main__":

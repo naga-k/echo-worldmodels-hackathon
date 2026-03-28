@@ -4,6 +4,7 @@ import { usePipeline } from "@/context/PipelineContext";
 import { Button } from "@/components/ui/button";
 import { Play, Pause, PanelRightOpen, PanelRightClose, BookOpen } from "lucide-react";
 import type { Scene } from "@/types/pipeline";
+import SceneViewer from "@/components/SceneViewer";
 
 const Experience = () => {
   const navigate = useNavigate();
@@ -77,11 +78,14 @@ const Experience = () => {
 
   return (
     <div className="h-screen w-screen relative overflow-hidden bg-background">
-      {/* 3D Placeholder */}
-      <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <p className="text-2xl font-display text-foreground/60">3D World: {activeScene?.title}</p>
-        {activeScene?.spz_url && (
-          <p className="text-xs text-muted-foreground mt-2 font-mono">{activeScene.spz_url}</p>
+      {/* 3D Viewer */}
+      <div className="absolute inset-0">
+        {activeScene?.spz_url ? (
+          <SceneViewer spzUrl={activeScene.spz_url} />
+        ) : (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-2xl font-display text-foreground/60">Loading world: {activeScene?.title}</p>
+          </div>
         )}
       </div>
 

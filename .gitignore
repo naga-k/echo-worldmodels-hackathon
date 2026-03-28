@@ -1,5 +1,7 @@
 # dependencies
 /node_modules
+# backend cache
+backend/.cache/
 /.pnp
 .pnp.*
 .yarn/*
