@@ -5,16 +5,36 @@ import { Button } from "@/components/ui/button";
 import { Play, Pause, PanelRightOpen, PanelRightClose, BookOpen } from "lucide-react";
 import type { Scene } from "@/types/pipeline";
 import SceneViewer from "@/components/SceneViewer";
+import VoiceChatButton from "@/components/VoiceChatButton";
+import { useGeminiLive } from "@/hooks/useGeminiLive";
 
 const Experience = () => {
   const navigate = useNavigate();
   const { pipelineData } = usePipeline();
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [activeSceneIndex, setActiveSceneIndex] = useState(0);
   const [panelOpen, setPanelOpen] = useState(false);
+
+  const activeScene = pipelineData?.scenes[activeSceneIndex];
+
+  const gemini = useGeminiLive({
+    storyText: pipelineData?.narration_text ?? "",
+    scenes: pipelineData?.scenes ?? [],
+    currentSceneId: activeScene?.id ?? "",
+    canvasRef,
+  });
+
+  // Pause narration while voice chat is active so the two don't overlap
+  useEffect(() => {
+    if (gemini.isActive && audioRef.current && isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    }
+  }, [gemini.isActive, isPlaying]);
 
   useEffect(() => {
     if (!pipelineData) {
@@ -74,14 +94,15 @@ const Experience = () => {
 
   if (!pipelineData) return null;
 
-  const activeScene = pipelineData.scenes[activeSceneIndex];
-
   return (
     <div className="h-screen w-screen relative overflow-hidden bg-background">
       {/* 3D Viewer */}
       <div className="absolute inset-0">
         {activeScene?.spz_url ? (
-          <SceneViewer spzUrl={activeScene.spz_url} showDebug={true} />
+          <SceneViewer
+            spzUrl={activeScene.spz_url} showDebug={true}
+            onCanvasReady={(canvas) => { canvasRef.current = canvas; }}
+          />
         ) : (
           <div className="flex items-center justify-center h-full">
             <p className="text-2xl font-display text-foreground/60">Loading world: {activeScene?.title}</p>
@@ -198,6 +219,16 @@ const Experience = () => {
             <span className="text-xs text-muted-foreground truncate max-w-[120px]">
               {activeScene?.title}
             </span>
+          </div>
+
+          {/* Gemini voice chat */}
+          <div className="ml-2 shrink-0">
+            <VoiceChatButton
+              status={gemini.status}
+              error={gemini.error}
+              onStart={gemini.start}
+              onStop={gemini.stop}
+            />
           </div>
         </div>
       </div>

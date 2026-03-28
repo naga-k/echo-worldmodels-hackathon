@@ -5,9 +5,10 @@ import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 interface SceneViewerProps {
   spzUrl: string;
   showDebug?: boolean; // default true — shows grid, axes, camera pos. Set false for demo.
+  onCanvasReady?: (canvas: HTMLCanvasElement) => void;
 }
 
-export default function SceneViewer({ spzUrl, showDebug = true }: SceneViewerProps) {
+export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }: SceneViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const [cameraInfo, setCameraInfo] = useState({ x: 0, y: 0, z: 0, yaw: 0, pitch: 0 });
@@ -34,11 +35,14 @@ export default function SceneViewer({ spzUrl, showDebug = true }: SceneViewerPro
         1000
       );
 
-      const renderer = new THREE.WebGLRenderer({ antialias: false });
+      // preserveDrawingBuffer allows canvas.toDataURL() to work for frame capture.
+      // Minor GPU optimization trade-off; acceptable at our render rate.
+      const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
       renderer.setSize(container.clientWidth, container.clientHeight);
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.autoClear = false;
       container.appendChild(renderer.domElement);
+      onCanvasReady?.(renderer.domElement);
 
       const sparkRenderer = new SparkRenderer({ renderer });
       scene.add(sparkRenderer);

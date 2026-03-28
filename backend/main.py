@@ -6,10 +6,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import base64
+
 import httpx
 from google import genai
+from google.genai import types as genai_types
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -495,6 +498,154 @@ async def clear_cache():
     for f in files:
         f.unlink()
     return {"cleared": len(files)}
+
+
+# ─── WebSocket /ws/gemini-live ───
+
+LIVE_SYSTEM_PROMPT = """You are Echo, a guide inside an immersive 3D story experience. \
+The user is exploring a 3D world generated from the following story:
+
+--- STORY ---
+{story_text}
+--- END STORY ---
+
+The story has been divided into these scenes:
+{scenes_summary}
+
+The user is currently viewing: {current_scene_title}
+Scene description: {current_scene_desc}
+
+You can see what the user sees through periodic canvas captures sent as video frames. \
+Speak naturally and conversationally. Answer questions about the story, describe what you see, \
+and help the user explore the world. Keep responses to 1-3 sentences since this is voice."""
+
+
+@app.websocket("/ws/gemini-live")
+async def gemini_live_ws(websocket: WebSocket):
+    await websocket.accept()
+
+    if not gemini_client:
+        await websocket.send_text(json.dumps({"type": "error", "message": "GEMINI_API_KEY not configured"}))
+        await websocket.close()
+        return
+
+    # Receive initial config from frontend
+    try:
+        init_raw = await websocket.receive_text()
+        cfg = json.loads(init_raw)
+        story_text: str = cfg.get("story_text", "")
+        scenes: list = cfg.get("scenes", [])
+        current_scene_id: str = cfg.get("current_scene_id", "")
+    except Exception as e:
+        await websocket.send_text(json.dumps({"type": "error", "message": f"Invalid init config: {e}"}))
+        await websocket.close()
+        return
+
+    # Build system instruction
+    scenes_summary = "\n".join(
+        f"- {s.get('title', s.get('id', ''))}: {s.get('narration_text', '')[:120]}"
+        for s in scenes
+    )
+    current_scene = next((s for s in scenes if s.get("id") == current_scene_id), scenes[0] if scenes else {})
+    system_instruction = LIVE_SYSTEM_PROMPT.format(
+        story_text=story_text[:3000],
+        scenes_summary=scenes_summary,
+        current_scene_title=current_scene.get("title", "Unknown scene"),
+        current_scene_desc=current_scene.get("narration_text", "")[:200],
+    )
+
+    live_config = {
+        "response_modalities": ["AUDIO"],
+        "system_instruction": system_instruction,
+    }
+
+    try:
+        async with gemini_client.aio.live.connect(
+            model="gemini-2.0-flash-live-001",
+            config=live_config,
+        ) as session:
+            await websocket.send_text(json.dumps({"type": "status", "message": "connected"}))
+
+            async def relay_frontend_to_gemini():
+                """Read frontend WebSocket messages and forward to Gemini."""
+                try:
+                    while True:
+                        message = await websocket.receive()
+                        if message["type"] == "websocket.disconnect":
+                            break
+                        if "bytes" in message and message["bytes"]:
+                            # Binary = raw PCM 16-bit 16kHz mic audio
+                            await session.send_realtime_input(
+                                audio=genai_types.Blob(
+                                    data=message["bytes"],
+                                    mime_type="audio/pcm;rate=16000",
+                                )
+                            )
+                        elif "text" in message and message["text"]:
+                            msg = json.loads(message["text"])
+                            if msg.get("type") == "frame":
+                                frame_bytes = base64.b64decode(msg["data"])
+                                await session.send_realtime_input(
+                                    video=genai_types.Blob(
+                                        data=frame_bytes,
+                                        mime_type="image/jpeg",
+                                    )
+                                )
+                            elif msg.get("type") == "scene_change":
+                                new_scene = next(
+                                    (s for s in scenes if s.get("id") == msg.get("scene_id")), None
+                                )
+                                if new_scene:
+                                    ctx = (
+                                        f"[Scene changed to: {new_scene.get('title', '')}. "
+                                        f"{new_scene.get('narration_text', '')[:100]}]"
+                                    )
+                                    await session.send_realtime_input(text=ctx)
+                except WebSocketDisconnect:
+                    pass
+                except Exception as e:
+                    print(f"[gemini-live] relay_frontend_to_gemini error: {e}")
+
+            async def relay_gemini_to_frontend():
+                """Read Gemini responses and forward to frontend WebSocket."""
+                try:
+                    async for response in session.receive():
+                        if response.server_content and response.server_content.model_turn:
+                            for part in response.server_content.model_turn.parts:
+                                if part.inline_data:
+                                    await websocket.send_bytes(part.inline_data.data)
+                        content = response.server_content
+                        if content:
+                            if content.output_transcription and content.output_transcription.text:
+                                await websocket.send_text(json.dumps({
+                                    "type": "transcript",
+                                    "text": content.output_transcription.text,
+                                }))
+                            if content.input_transcription and content.input_transcription.text:
+                                await websocket.send_text(json.dumps({
+                                    "type": "user_transcript",
+                                    "text": content.input_transcription.text,
+                                }))
+                except Exception as e:
+                    print(f"[gemini-live] relay_gemini_to_frontend error: {e}")
+
+            relay_task = asyncio.create_task(relay_frontend_to_gemini())
+            receive_task = asyncio.create_task(relay_gemini_to_frontend())
+            done, pending = await asyncio.wait(
+                [relay_task, receive_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[gemini-live] session error: {e}")
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
