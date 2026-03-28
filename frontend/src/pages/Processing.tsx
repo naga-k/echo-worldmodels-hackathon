@@ -57,7 +57,8 @@ const Processing = () => {
         // Step 3
         updateStep(2, { status: "active" });
         const worldsRes = await generateWorlds(
-          extracted.scenes.map((s) => ({ id: s.id, marble_prompt: s.marble_prompt }))
+          extracted.scenes.map((s) => ({ id: s.id, marble_prompt: s.marble_prompt })),
+          "Marble 0.1-plus"
         );
         updateStep(2, { status: "done", description: `${worldsRes.operations.length} worlds queued` });
 
@@ -77,7 +78,12 @@ const Processing = () => {
             if (ps.spz_url) {
               const sceneId = opToScene.get(ps.operation_id);
               finalScenes = finalScenes.map((s) =>
-                s.id === sceneId ? { ...s, spz_url: ps.spz_url } : s
+                s.id === sceneId ? {
+                  ...s,
+                  spz_url: ps.spz_url,
+                  collider_mesh_url: ps.collider_mesh_url,
+                  semantics: ps.semantics,
+                } : s
               );
             }
           }

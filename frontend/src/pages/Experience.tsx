@@ -100,7 +100,9 @@ const Experience = () => {
       <div className="absolute inset-0">
         {activeScene?.spz_url ? (
           <SceneViewer
-            spzUrl={activeScene.spz_url} showDebug={true}
+            spzUrl={activeScene.spz_url}
+            colliderMeshUrl={activeScene.collider_mesh_url}
+            showDebug={true}
             onCanvasReady={(canvas) => { canvasRef.current = canvas; }}
           />
         ) : (

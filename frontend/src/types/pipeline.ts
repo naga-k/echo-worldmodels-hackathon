@@ -9,6 +9,11 @@ export interface Scene {
   camera_direction: string;
   mood: string;
   spz_url?: string;
+  collider_mesh_url?: string;
+  semantics?: {
+    ground_plane_offset?: number;
+    metric_scale_factor?: number;
+  };
 }
 
 export interface ExtractScenesResponse {
@@ -30,6 +35,11 @@ export interface PollScene {
   operation_id: string;
   status: "generating" | "ready" | "failed" | "error";
   spz_url?: string;
+  collider_mesh_url?: string;
+  semantics?: {
+    ground_plane_offset?: number;
+    metric_scale_factor?: number;
+  };
   error?: string;
 }
 

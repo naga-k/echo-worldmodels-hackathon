@@ -108,7 +108,10 @@ ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
 # ElevenLabs "Adam" voice - good narrative voice
 ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+gemini_client = genai.Client(
+    http_options={"api_version": "v1beta"},
+    api_key=GEMINI_API_KEY,
+) if GEMINI_API_KEY else None
 
 
 # ─── Models ───
@@ -441,10 +444,17 @@ async def poll_worlds(operation_ids: str):
 
             if data.get("done") or data.get("status") == "SUCCEEDED":
                 spz_url = _extract_spz_url(data)
+                # Extract collider mesh and semantics
+                resp = data.get("response") or data.get("result") or {}
+                assets = resp.get("assets", {}) if isinstance(resp, dict) else {}
+                mesh = assets.get("mesh", {}) or {}
+                splats = assets.get("splats", {}) or {}
                 return {
                     "operation_id": operation_id,
                     "status": "ready",
                     "spz_url": spz_url,
+                    "collider_mesh_url": mesh.get("collider_mesh_url"),
+                    "semantics": splats.get("semantics_metadata"),
                 }
 
             if data.get("error") or data.get("status") == "FAILED":
@@ -554,14 +564,24 @@ async def gemini_live_ws(websocket: WebSocket):
         current_scene_desc=current_scene.get("narration_text", "")[:200],
     )
 
-    live_config = {
-        "response_modalities": ["AUDIO"],
-        "system_instruction": system_instruction,
-    }
+    live_config = genai_types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        system_instruction=system_instruction,
+        media_resolution="MEDIA_RESOLUTION_MEDIUM",
+        speech_config=genai_types.SpeechConfig(
+            voice_config=genai_types.VoiceConfig(
+                prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(voice_name="Zephyr")
+            )
+        ),
+        context_window_compression=genai_types.ContextWindowCompressionConfig(
+            trigger_tokens=104857,
+            sliding_window=genai_types.SlidingWindow(target_tokens=52428),
+        ),
+    )
 
     try:
         async with gemini_client.aio.live.connect(
-            model="gemini-2.0-flash-live-001",
+            model="models/gemini-3.1-flash-live-preview",
             config=live_config,
         ) as session:
             await websocket.send_text(json.dumps({"type": "status", "message": "connected"}))
@@ -575,8 +595,8 @@ async def gemini_live_ws(websocket: WebSocket):
                             break
                         if "bytes" in message and message["bytes"]:
                             # Binary = raw PCM 16-bit 16kHz mic audio
-                            await session.send_realtime_input(
-                                audio=genai_types.Blob(
+                            await session.send(
+                                input=genai_types.Blob(
                                     data=message["bytes"],
                                     mime_type="audio/pcm;rate=16000",
                                 )
@@ -585,8 +605,8 @@ async def gemini_live_ws(websocket: WebSocket):
                             msg = json.loads(message["text"])
                             if msg.get("type") == "frame":
                                 frame_bytes = base64.b64decode(msg["data"])
-                                await session.send_realtime_input(
-                                    video=genai_types.Blob(
+                                await session.send(
+                                    input=genai_types.Blob(
                                         data=frame_bytes,
                                         mime_type="image/jpeg",
                                     )
@@ -600,7 +620,7 @@ async def gemini_live_ws(websocket: WebSocket):
                                         f"[Scene changed to: {new_scene.get('title', '')}. "
                                         f"{new_scene.get('narration_text', '')[:100]}]"
                                     )
-                                    await session.send_realtime_input(text=ctx)
+                                    await session.send(input=ctx, end_of_turn=True)
                 except WebSocketDisconnect:
                     pass
                 except Exception as e:
@@ -609,22 +629,15 @@ async def gemini_live_ws(websocket: WebSocket):
             async def relay_gemini_to_frontend():
                 """Read Gemini responses and forward to frontend WebSocket."""
                 try:
-                    async for response in session.receive():
-                        if response.server_content and response.server_content.model_turn:
-                            for part in response.server_content.model_turn.parts:
-                                if part.inline_data:
-                                    await websocket.send_bytes(part.inline_data.data)
-                        content = response.server_content
-                        if content:
-                            if content.output_transcription and content.output_transcription.text:
+                    while True:
+                        turn = session.receive()
+                        async for response in turn:
+                            if data := response.data:
+                                await websocket.send_bytes(data)
+                            if text := response.text:
                                 await websocket.send_text(json.dumps({
                                     "type": "transcript",
-                                    "text": content.output_transcription.text,
-                                }))
-                            if content.input_transcription and content.input_transcription.text:
-                                await websocket.send_text(json.dumps({
-                                    "type": "user_transcript",
-                                    "text": content.input_transcription.text,
+                                    "text": text,
                                 }))
                 except Exception as e:
                     print(f"[gemini-live] relay_gemini_to_frontend error: {e}")

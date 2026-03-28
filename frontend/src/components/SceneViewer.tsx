@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 
 interface SceneViewerProps {
   spzUrl: string;
+  colliderMeshUrl?: string;
   showDebug?: boolean; // default true — shows grid, axes, camera pos. Set false for demo.
   onCanvasReady?: (canvas: HTMLCanvasElement) => void;
 }
 
-export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }: SceneViewerProps) {
+export default function SceneViewer({ spzUrl, colliderMeshUrl, showDebug = true, onCanvasReady }: SceneViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
-  const [cameraInfo, setCameraInfo] = useState({ x: 0, y: 0, z: 0, yaw: 0, pitch: 0 });
+  const [cameraInfo, setCameraInfo] = useState({ x: 0, y: 0, z: 0, yaw: 0, pitch: 0, sceneSize: 0 });
 
   useEffect(() => {
     if (!containerRef.current || !spzUrl) return;
@@ -52,6 +54,7 @@ export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }:
 
       // World Labs OpenCV → Three.js OpenGL coordinate transform
       splatMesh.scale.set(1, -1, -1);
+      splatMesh.opacity = 1.5;
       scene.add(splatMesh);
 
       if (cancelled) {
@@ -156,10 +159,49 @@ export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }:
       origin.renderOrder = 1001;
       gizmoGroup.add(origin);
 
+      // ─── Collider mesh (used for camera collision) ───
+      let colliderMeshes: THREE.Mesh[] = [];
+      const colliderRaycaster = new THREE.Raycaster();
+      const collisionRadius = 0.15; // min distance from walls
+
+      if (colliderMeshUrl) {
+        const loader = new GLTFLoader();
+        try {
+          const gltf = await new Promise<any>((resolve, reject) => {
+            loader.load(colliderMeshUrl, resolve, undefined, reject);
+          });
+          const colliderGroup = gltf.scene;
+          // Same OpenCV → OpenGL coordinate flip
+          colliderGroup.scale.set(1, -1, -1);
+          scene.add(colliderGroup);
+          // Update world matrices AFTER adding to scene
+          colliderGroup.updateMatrixWorld(true);
+
+          colliderGroup.traverse((child: THREE.Object3D) => {
+            if ((child as THREE.Mesh).isMesh) {
+              const mesh = child as THREE.Mesh;
+              // Wireframe in debug, fully transparent otherwise (must stay visible for raycasting)
+              mesh.material = new THREE.MeshBasicMaterial({
+                wireframe: showDebug,
+                color: 0x00ff00,
+                transparent: true,
+                opacity: showDebug ? 0.15 : 0,
+                depthWrite: false,
+              });
+              mesh.renderOrder = 998;
+              colliderMeshes.push(mesh);
+            }
+          });
+          console.log(`[SceneViewer] Collider mesh loaded: ${colliderMeshes.length} meshes`);
+        } catch (e) {
+          console.warn("[SceneViewer] Failed to load collider mesh:", e);
+        }
+      }
+
       // ─── Camera start position ───
-      const startOffset = sceneSize * 0.5;
-      camera.position.set(center.x, center.y, center.z + startOffset);
-      camera.lookAt(center);
+      // World Labs scenes have the camera origin near (0,0,0) looking into the scene.
+      // Start close to origin, slightly above, looking forward.
+      camera.position.set(0, 0.16, -0.27);
 
       // ─── First-person controls ───
       let yaw = Math.PI;
@@ -168,8 +210,8 @@ export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }:
       let prevX = 0;
       let prevY = 0;
 
-      const moveSpeed = sceneSize * 0.004;
-      const lookSpeed = 0.003;
+      const moveSpeed = sceneSize * 0.001;
+      const lookSpeed = 0.0015;
 
       function updateCameraRotation() {
         const q = new THREE.Quaternion();
@@ -201,8 +243,19 @@ export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }:
       };
       const onWheel = (e: WheelEvent) => {
         e.preventDefault();
-        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-        camera.position.addScaledVector(forward, -e.deltaY * moveSpeed * 0.5);
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const scrollMove = fwd.multiplyScalar(-e.deltaY * moveSpeed * 0.5);
+
+        if (scrollMove.length() > 0 && colliderMeshes.length > 0) {
+          const dir = scrollMove.clone().normalize();
+          colliderRaycaster.set(camera.position, dir);
+          colliderRaycaster.far = collisionRadius + scrollMove.length();
+          const hits = colliderRaycaster.intersectObjects(colliderMeshes, true);
+          if (hits.length > 0 && hits[0].distance < collisionRadius + scrollMove.length()) {
+            return; // block scroll into wall
+          }
+        }
+        camera.position.add(scrollMove);
       };
 
       const keys = new Set<string>();
@@ -228,12 +281,35 @@ export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }:
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
         const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
 
-        if (keys.has("w")) camera.position.addScaledVector(forward, moveSpeed);
-        if (keys.has("s")) camera.position.addScaledVector(forward, -moveSpeed);
-        if (keys.has("a")) camera.position.addScaledVector(right, -moveSpeed);
-        if (keys.has("d")) camera.position.addScaledVector(right, moveSpeed);
-        if (keys.has("q") || keys.has("shift")) camera.position.y -= moveSpeed;
-        if (keys.has("e") || keys.has(" ")) camera.position.y += moveSpeed;
+        // Build desired movement
+        const move = new THREE.Vector3();
+        if (keys.has("w")) move.addScaledVector(forward, moveSpeed);
+        if (keys.has("s")) move.addScaledVector(forward, -moveSpeed);
+        if (keys.has("a")) move.addScaledVector(right, -moveSpeed);
+        if (keys.has("d")) move.addScaledVector(right, moveSpeed);
+        if (keys.has("q") || keys.has("shift")) move.y -= moveSpeed;
+        if (keys.has("e") || keys.has(" ")) move.y += moveSpeed;
+
+        // Collision check: cast ray in movement direction, block if wall is too close
+        if (move.length() > 0 && colliderMeshes.length > 0) {
+          const dir = move.clone().normalize();
+          colliderRaycaster.set(camera.position, dir);
+          colliderRaycaster.far = collisionRadius + move.length();
+          const hits = colliderRaycaster.intersectObjects(colliderMeshes, true);
+          if (hits.length > 0 && hits[0].distance < collisionRadius + move.length()) {
+            // Slide: zero out the component toward the wall
+            const wallNormal = hits[0].face?.normal?.clone();
+            if (wallNormal) {
+              wallNormal.transformDirection(hits[0].object.matrixWorld);
+              const dot = move.dot(wallNormal);
+              if (dot < 0) {
+                move.addScaledVector(wallNormal, -dot);
+              }
+            }
+          }
+        }
+
+        camera.position.add(move);
 
         // Update camera info HUD every 10 frames
         if (showDebug && frameCount % 10 === 0) {
@@ -243,6 +319,7 @@ export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }:
             z: camera.position.z,
             yaw: THREE.MathUtils.radToDeg(yaw) % 360,
             pitch: THREE.MathUtils.radToDeg(pitch),
+            sceneSize,
           });
         }
 
@@ -299,15 +376,16 @@ export default function SceneViewer({ spzUrl, showDebug = true, onCanvasReady }:
       cancelled = true;
       cleanupRef.current?.();
     };
-  }, [spzUrl, showDebug]);
+  }, [spzUrl, colliderMeshUrl, showDebug]);
 
   return (
     <div ref={containerRef} className="w-full h-full relative" tabIndex={0} style={{ outline: "none" }}>
       {/* Camera position HUD */}
       {showDebug && (
-        <div className="absolute top-3 left-3 bg-black/60 text-green-400 font-mono text-[11px] px-3 py-2 rounded pointer-events-none z-50 leading-relaxed">
-          <div>pos: {cameraInfo.x.toFixed(2)}, {cameraInfo.y.toFixed(2)}, {cameraInfo.z.toFixed(2)}</div>
+        <div className="absolute right-3 top-1/2 -translate-y-1/2 bg-black/60 text-green-400 font-mono text-[11px] px-3 py-2 rounded pointer-events-auto select-text z-50 leading-relaxed">
+          <div>pos: {cameraInfo.x.toFixed(3)}, {cameraInfo.y.toFixed(3)}, {cameraInfo.z.toFixed(3)}</div>
           <div>yaw: {cameraInfo.yaw.toFixed(1)}° pitch: {cameraInfo.pitch.toFixed(1)}°</div>
+          <div>scene: {cameraInfo.sceneSize?.toFixed(3)}</div>
         </div>
       )}
     </div>
