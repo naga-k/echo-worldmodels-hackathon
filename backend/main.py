@@ -109,7 +109,7 @@ ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
 ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"
 
 gemini_client = genai.Client(
-    http_options={"api_version": "v1beta"},
+    http_options={"api_version": "v1alpha"},
     api_key=GEMINI_API_KEY,
 ) if GEMINI_API_KEY else None
 
@@ -595,8 +595,8 @@ async def gemini_live_ws(websocket: WebSocket):
                             break
                         if "bytes" in message and message["bytes"]:
                             # Binary = raw PCM 16-bit 16kHz mic audio
-                            await session.send(
-                                input=genai_types.Blob(
+                            await session.send_realtime_input(
+                                audio=genai_types.Blob(
                                     data=message["bytes"],
                                     mime_type="audio/pcm;rate=16000",
                                 )
@@ -605,8 +605,8 @@ async def gemini_live_ws(websocket: WebSocket):
                             msg = json.loads(message["text"])
                             if msg.get("type") == "frame":
                                 frame_bytes = base64.b64decode(msg["data"])
-                                await session.send(
-                                    input=genai_types.Blob(
+                                await session.send_realtime_input(
+                                    video=genai_types.Blob(
                                         data=frame_bytes,
                                         mime_type="image/jpeg",
                                     )
@@ -620,7 +620,7 @@ async def gemini_live_ws(websocket: WebSocket):
                                         f"[Scene changed to: {new_scene.get('title', '')}. "
                                         f"{new_scene.get('narration_text', '')[:100]}]"
                                     )
-                                    await session.send(input=ctx, end_of_turn=True)
+                                    await session.send_realtime_input(text=ctx)
                 except WebSocketDisconnect:
                     pass
                 except Exception as e:
