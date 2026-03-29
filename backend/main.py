@@ -864,6 +864,13 @@ async def gemini_live_ws(websocket: WebSocket):
                 prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(voice_name="Zephyr")
             )
         ),
+        realtime_input_config=genai_types.RealtimeInputConfig(
+            automatic_activity_detection=genai_types.AutomaticActivityDetection(
+                disabled=False,
+                start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
+                end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
+            ),
+        ),
         context_window_compression=genai_types.ContextWindowCompressionConfig(
             trigger_tokens=104857,
             sliding_window=genai_types.SlidingWindow(target_tokens=52428),
@@ -928,6 +935,13 @@ async def gemini_live_ws(websocket: WebSocket):
                     while True:
                         turn = session.receive()
                         async for response in turn:
+                            # Check for interruption signal from Gemini
+                            sc = response.server_content if hasattr(response, "server_content") else None
+                            if sc and getattr(sc, "interrupted", False):
+                                await websocket.send_text(json.dumps({
+                                    "type": "interrupted",
+                                    "interrupted": True,
+                                }))
                             if data := response.data:
                                 await websocket.send_bytes(data)
                             if text := response.text:
