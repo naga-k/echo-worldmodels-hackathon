@@ -1,81 +1,100 @@
 ---
 name: grab-story
-description: Fetch a public domain book chapter from Project Gutenberg and save it to backend/db/ for use as Echo story input. Use when asked to "grab", "fetch", "download", or "get" a book, chapter, or story passage.
-version: 0.1.0
+description: Find and fetch story text for Echo from any source — URLs, PDFs, book names, topics, or vague vibes. Saves to backend/db/. Use when asked to "grab", "fetch", "download", "get", or "find" a book, chapter, story, passage, or text. Also use when the user needs demo content, test input, something to paste into Echo, or says things like "find me something good to try", "I need a story", or "get me something visual/immersive".
+version: 0.2.0
 allowed-tools:
   - Bash
   - Read
   - Write
   - Grep
   - WebFetch
+  - Agent
 ---
 
-# Grab Story — Fetch public domain text for Echo
+# Grab Story — Fetch text for Echo
 
-Fetches a book chapter or passage from Project Gutenberg and saves it to `backend/db/` so it can be pasted into Echo's story input.
+Finds and fetches story text from any source and saves it to `backend/db/` for use as Echo input. Handles URLs, book names, topics, PDFs, and vague prompts.
 
-## How to use
+## What the user might say
 
-The user will say something like:
-- "grab chapter 3 of Dracula"
-- "fetch the opening of Moby Dick"
-- "get 20,000 Leagues chapter 10"
+- "grab chapter 3 of Dracula" — specific book + chapter
+- "get me something from ancient Greek mythology" — topic/vibe
+- "fetch this: https://example.com/story.pdf" — direct URL
+- "find a vivid horror passage" — mood-based request
+- "download the opening of Moby Dick" — specific section
+- "get something with rich visuals for a 3D demo" — Echo-optimized request
 
-### Step 1: Find the book on Project Gutenberg
+## Strategy: Adapt to the input
 
-Search for the book using the Gutenberg search page:
-```
-https://www.gutenberg.org/ebooks/search/?query={book+name}
-```
+### If the user gives a direct URL
 
-Use WebFetch to find the ebook number. Then get the plain text URL:
-```
-https://www.gutenberg.org/files/{ebook_id}/{ebook_id}-0.txt
-```
+1. Determine the content type:
+   - **HTML page**: Use WebFetch to get the content, or curl + strip HTML tags
+   - **PDF**: Download with curl, use `pdftotext` to extract (check `which pdftotext` first, install with `brew install poppler` if missing)
+   - **Plain text**: Download directly with curl
+2. Extract the requested section (chapter, passage, etc.)
+3. Save to `backend/db/`
 
-If the `-0.txt` URL doesn't work, try:
-```
-https://www.gutenberg.org/cache/epub/{ebook_id}/pg{ebook_id}.txt
-```
+### If the user gives a book name (with or without chapter)
 
-### Step 2: Download the full text
+Search multiple public domain sources in order:
+1. **Project Gutenberg** — largest free ebook library
+   - Search: `https://www.gutenberg.org/ebooks/search/?query={book+name}`
+   - Plain text: `https://www.gutenberg.org/files/{id}/{id}-0.txt` or `https://www.gutenberg.org/cache/epub/{id}/pg{id}.txt`
+2. **Standard Ebooks** — beautifully formatted public domain books
+   - Browse: `https://standardebooks.org/ebooks/` (search by author/title)
+3. **Internet Archive** — huge collection of texts
+   - Search: `https://archive.org/search?query={book+name}&mediatype=texts`
+4. **WikiSource** — source texts with good structure
+5. **General web search** via WebFetch if needed
 
-```bash
-curl -sL -o /tmp/gutenberg-{ebook_id}.txt "https://www.gutenberg.org/files/{ebook_id}/{ebook_id}-0.txt"
-```
+### If the user gives a topic or vibe
 
-### Step 3: Find chapter boundaries
+Use your knowledge to suggest 2-3 specific books/passages that would work well for Echo (visually rich, describable physical spaces), then fetch the user's pick. Prioritize:
+- Vivid physical descriptions (architecture, landscapes, interiors)
+- Strong atmosphere and lighting
+- Multiple distinct locations/scenes
+- Public domain or freely available
 
-Use grep to find the start and end lines of the requested chapter:
-```bash
-grep -n "Chapter\|CHAPTER" /tmp/gutenberg-{ebook_id}.txt
-```
+Good Echo sources by genre:
+- **Gothic**: Poe, Stoker, Shelley, Lovecraft
+- **Adventure**: Verne, Stevenson, Doyle
+- **Fantasy**: Tolkien (some public domain), myths, fairy tales
+- **Historical**: Dickens, Hugo, Dumas
+- **Horror**: Lovecraft, M.R. James, Blackwood
+- **Mythology**: Ovid, Homer, Norse Eddas
 
-If chapters aren't labeled cleanly, search for known opening lines of the chapter.
+## Extraction
 
-### Step 4: Extract the chapter
+### For plain text files
+1. Download to `/tmp/`
+2. Find chapter/section boundaries with grep
+3. Strip boilerplate headers/footers (Gutenberg `*** START/END ***`, etc.)
+4. Extract the requested section with sed
 
-Use sed to extract the lines between chapter start and the next chapter:
-```bash
-sed -n '{start_line},{end_line}p' /tmp/gutenberg-{ebook_id}.txt > backend/db/{book-slug}-ch{N}.txt
-```
+### For HTML pages
+1. Fetch with WebFetch or curl
+2. Strip HTML: `<script>`, `<style>`, tags, entities
+3. Extract the relevant section
 
-Naming convention: `{book-slug}-ch{N}.txt`
-- `great-gatsby-ch3.txt`
-- `dracula-ch1.txt`
-- `moby-dick-ch1.txt`
+### For PDFs
+1. Download to `/tmp/`
+2. Convert with `pdftotext -f {start_page} -l {end_page} input.pdf output.txt`
+3. Clean up the extracted text
 
-### Step 5: Confirm
+## Saving
 
-Tell the user:
-- File saved at `backend/db/{filename}`
-- Line count
-- Show the first few lines so they can verify it's the right content
+- Save to `backend/db/` in the repo
+- Naming: `{book-slug}-ch{N}.txt` or `{descriptive-name}.txt`
+  - `great-gatsby-ch3.txt`
+  - `norse-creation-myth.txt`
+  - `fall-of-house-of-usher.txt`
+- Show the user: file path, line count, and first few lines to confirm
 
 ## Important notes
 
-- Only fetch from Project Gutenberg (gutenberg.org) — all texts are public domain
-- Save to `backend/db/` directory in the repo
-- Strip the Gutenberg header/footer (lines before/after `*** START/END OF THE PROJECT GUTENBERG EBOOK ***`)
-- If the user asks for a specific passage rather than a full chapter, extract just that portion
+- Prefer public domain texts — check copyright status if unsure
+- For Echo, prioritize passages with rich spatial/visual descriptions over dialogue-heavy sections
+- If the text is very long (>10k chars), warn the user and suggest a shorter section
 - Clean up temp files in /tmp after extraction
+- If you can't find the exact text, tell the user what you found and ask how to proceed
