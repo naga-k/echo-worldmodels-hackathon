@@ -63,9 +63,14 @@ const Experience = () => {
   const handleEnterWorld = async () => {
     setEntered(true);
     await mixer.resume();
+    // Start voice guide connection immediately (user gesture context)
+    // This runs before the entered useEffect fires, giving Gemini a head start
+    gemini.start();
   };
 
-  // Auto-start BGM + voice guide after entering
+  const [voiceToast, setVoiceToast] = useState<string | null>(null);
+
+  // Auto-start BGM after entering (voice guide already started in handleEnterWorld)
   useEffect(() => {
     if (!entered || !id || !activeScene) return;
 
@@ -73,11 +78,17 @@ const Experience = () => {
     const bgmUrl = getBgmUrl(id, activeScene.id);
     mixer.startBgm(bgmUrl);
 
-    // Auto-connect Gemini Live voice guide
-    gemini.start();
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entered]);
+
+  // Show toast if voice guide fails to connect
+  useEffect(() => {
+    if (!entered) return;
+    if (gemini.status === "error") {
+      setVoiceToast("Voice guide unavailable — enjoying with music only");
+      setTimeout(() => setVoiceToast(null), 5000);
+    }
+  }, [gemini.status, entered]);
 
   // Ducking: when Gemini is speaking, duck BGM; when it stops, restore
   useEffect(() => {
@@ -145,6 +156,13 @@ const Experience = () => {
 
   return (
     <div className="h-screen w-screen relative overflow-hidden bg-background">
+      {/* Voice guide toast */}
+      {voiceToast && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 bg-card/90 border border-border backdrop-blur-sm rounded-lg px-4 py-2 text-sm text-muted-foreground animate-fade-in-up">
+          {voiceToast}
+        </div>
+      )}
+
       {/* 3D Viewer */}
       <div className="absolute inset-0">
         {activeScene?.spz_url ? (

@@ -80,8 +80,16 @@ export function useAudioMixer() {
       bgmGain.gain.setValueAtTime(0, ctx.currentTime);
       bgmGain.gain.linearRampToValueAtTime(BGM_VOLUME, ctx.currentTime + 1.0);
 
+      // Handle load errors (404 = no BGM generated for this scene)
+      audio.onerror = () => {
+        console.log("[bgm] BGM not available for this scene, continuing without music");
+        bgmAudioRef.current = null;
+        bgmSourceRef.current?.disconnect();
+        bgmSourceRef.current = null;
+      };
+
       audio.play().catch(() => {
-        // Autoplay blocked — will play once user interacts (resume() should prevent this)
+        // Autoplay blocked or file not available — continue silently
       });
     },
     [ensureContext],
