@@ -29,6 +29,7 @@ export function useGeminiLive({
   const [error, setError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
+  const [held, setHeld] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const stopMicRef = useRef<(() => void) | null>(null);
@@ -37,6 +38,7 @@ export function useGeminiLive({
   const speakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isSpeakingRef = useRef(false);
   const micMutedRef = useRef(false);
+  const heldRef = useRef(false);
   // Track scene changes so we can notify Gemini without restarting
   const prevSceneIdRef = useRef(currentSceneId);
 
@@ -140,6 +142,8 @@ export function useGeminiLive({
       // Set up permanent message handler for the live session
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
+          // When held, silently drop audio chunks (session stays alive)
+          if (heldRef.current) return;
           // Binary = 16-bit PCM audio response from Gemini at 24kHz
           isSpeakingRef.current = true;
           setIsSpeaking(true);
@@ -180,7 +184,7 @@ export function useGeminiLive({
       // Gemini Live handles turn-taking server-side. Mic can be muted
       // via toggleMic() without disconnecting the session.
       const stopMic = await createMicrophoneStream((pcm) => {
-        if (ws.readyState === WebSocket.OPEN && !micMutedRef.current) {
+        if (ws.readyState === WebSocket.OPEN && !micMutedRef.current && !heldRef.current) {
           ws.send(pcm);
         }
       });
@@ -212,6 +216,16 @@ export function useGeminiLive({
     setMicMuted(micMutedRef.current);
   }, []);
 
+  const toggleHold = useCallback(() => {
+    heldRef.current = !heldRef.current;
+    setHeld(heldRef.current);
+    if (heldRef.current) {
+      // Clear speaking state when holding
+      isSpeakingRef.current = false;
+      setIsSpeaking(false);
+    }
+  }, []);
+
   // Cleanup on unmount
   useEffect(() => () => cleanup(), [cleanup]);
 
@@ -221,7 +235,9 @@ export function useGeminiLive({
     start,
     stop,
     toggleMic,
+    toggleHold,
     micMuted,
+    held,
     isActive: status !== "disconnected",
     isSpeaking,
   };

@@ -2,10 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { getGeneration, getBgmUrl } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { PanelRightOpen, PanelRightClose, BookOpen, Share2, Check, ChevronLeft, ChevronRight } from "lucide-react";
+import { PanelRightOpen, PanelRightClose, BookOpen, Share2, Check, ChevronLeft, ChevronRight, Mic, MicOff, Pause, Play } from "lucide-react";
 import type { Generation } from "@/types/pipeline";
 import SceneViewer from "@/components/SceneViewer";
-import VoiceChatButton from "@/components/VoiceChatButton";
 import { useGeminiLive } from "@/hooks/useGeminiLive";
 import { useAudioMixer } from "@/hooks/useAudioMixer";
 
@@ -90,16 +89,16 @@ const Experience = () => {
     }
   }, [gemini.status, entered]);
 
-  // Ducking: when Gemini is speaking, duck BGM; when it stops, restore
+  // Ducking: when Gemini is speaking (and not held), duck BGM
   useEffect(() => {
     if (!entered) return;
-    if (gemini.isSpeaking) {
+    if (gemini.isSpeaking && !gemini.held) {
       mixer.duckBgm();
     } else {
       mixer.unduckBgm();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gemini.isSpeaking, entered]);
+  }, [gemini.isSpeaking, gemini.held, entered]);
 
   // On scene change: switch BGM to the new scene
   const prevSceneIndexRef = useRef(activeSceneIndex);
@@ -265,14 +264,32 @@ const Experience = () => {
             <ChevronRight className="w-5 h-5" />
           </Button>
 
-          {/* Gemini voice chat — toggle mic mute, don't restart session */}
-          <div className="ml-2 shrink-0">
-            <VoiceChatButton
-              status={gemini.micMuted ? "disconnected" : gemini.status}
-              error={gemini.error}
-              onStart={gemini.toggleMic}
-              onStop={gemini.toggleMic}
-            />
+          {/* Voice controls: Hold (pause guide) + Mic (mute/unmute) */}
+          <div className="ml-2 shrink-0 flex items-center gap-1.5">
+            <button
+              onClick={gemini.toggleHold}
+              aria-label={gemini.held ? "Resume guide" : "Pause guide"}
+              className={[
+                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 border",
+                gemini.held
+                  ? "bg-muted border-border text-muted-foreground"
+                  : "glass border-white/10 text-primary",
+              ].join(" ")}
+            >
+              {gemini.held ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+            </button>
+            <button
+              onClick={gemini.toggleMic}
+              aria-label={gemini.micMuted ? "Unmute mic" : "Mute mic"}
+              className={[
+                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 border",
+                gemini.micMuted
+                  ? "bg-destructive/20 border-destructive/40 text-destructive"
+                  : "bg-primary border-primary text-primary-foreground shadow-lg shadow-primary/30",
+              ].join(" ")}
+            >
+              {gemini.micMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </button>
           </div>
         </div>
       </div>
