@@ -350,11 +350,13 @@ async def generate_bgm(generation_id: str, scene_id: str, music_description: str
 
             # Extract audio bytes from response
             audio_data = None
-            if response.candidates:
-                for part in response.candidates[0].content.parts:
-                    if part.inline_data and part.inline_data.data:
-                        audio_data = part.inline_data.data
-                        break
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if part.inline_data and part.inline_data.data:
+                            audio_data = part.inline_data.data
+                            break
 
             if not audio_data:
                 print(f"[bgm] No audio data in Lyria response for {scene_id}")
@@ -744,6 +746,9 @@ async def get_generation_audio(gen_id: str):
          summary="Get scene background music",
          description="Serves the BGM MP3 file for a specific scene in a generation.")
 async def get_scene_bgm(gen_id: str, scene_id: str):
+    import re
+    if not re.match(r'^[a-zA-Z0-9_-]+$', gen_id) or not re.match(r'^[a-zA-Z0-9_-]+$', scene_id):
+        raise HTTPException(400, "Invalid generation or scene ID")
     bgm_file = AUDIO_DIR / f"bgm_{gen_id}_{scene_id}.mp3"
     if not bgm_file.exists():
         raise HTTPException(404, "BGM not found for this scene")
@@ -795,10 +800,14 @@ async def clear_cache():
 # ─── WebSocket /ws/gemini-live ───
 
 LIVE_SYSTEM_PROMPT = """You are Echo, a narrator and guide inside an immersive 3D story experience. \
-The user has just entered a world generated from a story. When the session begins, IMMEDIATELY \
-start by setting the scene — describe what the user is seeing in the current world, introduce \
-the atmosphere, and begin telling the story. Speak naturally and conversationally. If the user \
-speaks, pause and respond, then resume narrating. Keep responses to 1-3 sentences since this is voice.
+The user has just entered a world generated from a story.
+
+When the session begins, give a brief welcome (1-2 sentences) setting the scene for what the user \
+is seeing. Then STOP and WAIT for the user to speak or ask a question. Do NOT keep narrating \
+unprompted. You are a guide, not an audiobook. Speak only when spoken to after your initial greeting.
+
+You can see what the user sees through periodic canvas captures sent as video frames. \
+Reference what you see when relevant. Keep all responses to 1-3 sentences since this is voice.
 
 --- STORY ---
 {story_text}

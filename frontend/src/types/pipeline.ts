@@ -8,6 +8,8 @@ export interface Scene {
   time_end: number;
   camera_direction: string;
   mood: string;
+  music_description?: string;
+  bgm_path?: string;
   spz_url?: string;
   collider_mesh_url?: string;
   semantics?: {

@@ -1,7 +1,13 @@
 # dependencies
 /node_modules
-# backend cache
+# backend cache + data
 backend/.cache/
+backend/.venv/
+backend/__pycache__/
+backend/db/echo.db
+backend/db/echo.db-shm
+backend/db/echo.db-wal
+backend/db/audio/
 /.pnp
 .pnp.*
 .yarn/*
@@ -40,3 +46,5 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+.gstack/
+.claude/worktrees/

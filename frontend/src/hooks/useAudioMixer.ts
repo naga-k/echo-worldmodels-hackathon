@@ -87,15 +87,34 @@ export function useAudioMixer() {
     [ensureContext],
   );
 
-  /** Stop BGM playback and release the audio element. */
+  /** Stop BGM playback with a short fade-out, then release the audio element. */
   const stopBgm = useCallback(() => {
-    if (bgmAudioRef.current) {
-      bgmAudioRef.current.pause();
-      bgmAudioRef.current.src = "";
+    const ctx = ctxRef.current;
+    const bgmGain = bgmGainRef.current;
+    const audio = bgmAudioRef.current;
+    const source = bgmSourceRef.current;
+
+    if (ctx && bgmGain && audio) {
+      // Fade out over 500ms, then clean up
+      bgmGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+      setTimeout(() => {
+        audio.pause();
+        audio.src = "";
+        source?.disconnect();
+        // Only clear refs if they haven't been replaced by a new startBgm call
+        if (bgmAudioRef.current === audio) {
+          bgmAudioRef.current = null;
+          bgmSourceRef.current = null;
+        }
+      }, 550);
+    } else {
+      // No context, just clean up immediately
+      if (audio) {
+        audio.pause();
+        audio.src = "";
+      }
       bgmAudioRef.current = null;
-    }
-    if (bgmSourceRef.current) {
-      bgmSourceRef.current.disconnect();
+      if (source) source.disconnect();
       bgmSourceRef.current = null;
     }
   }, []);

@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { getGeneration } from "@/lib/api";
 import type { Generation, Scene } from "@/types/pipeline";
-import { Check, Loader2, Globe, Eye, Sparkles, AlertCircle } from "lucide-react";
+import { Check, Loader2, Globe, Eye, Sparkles, AlertCircle, Music } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -21,7 +21,7 @@ const STATUS_TO_STEP: Record<string, number> = {
   generating_speech: 1,
   building_worlds: 1,
   polling: 2,
-  completed: 3,
+  completed: 4,
   failed: -1,
 };
 
@@ -36,16 +36,20 @@ const Processing = () => {
     const activeStep = generation ? STATUS_TO_STEP[generation.status] ?? -1 : -1;
     const isFailed = generation?.status === "failed";
 
+    const bgmCount = generation?.scenes?.filter((s) => s.bgm_path).length || 0;
+    const sceneCount = generation?.scenes?.length || 0;
+    const worldsReady = generation?.scenes?.filter((s) => s.spz_url).length || 0;
+
     return [
       {
         label: "Extracting scenes",
-        description: activeStep > 0 ? `${generation?.scenes?.length || 0} scenes found` : "Analyzing your story...",
+        description: activeStep > 0 ? `${sceneCount} scenes found` : "Analyzing your story...",
         icon: <Sparkles className="w-4 h-4" />,
         status: isFailed && activeStep === -1 ? "error" : activeStep > 0 ? "done" : activeStep === 0 ? "active" : "pending",
       },
       {
-        label: "Building worlds",
-        description: activeStep > 1 ? `${generation?.scenes?.length || 0} worlds queued` : "Constructing 3D environments...",
+        label: "Building worlds + music",
+        description: activeStep > 1 ? `${sceneCount} worlds queued, ${bgmCount} BGM tracks` : "Constructing 3D environments & generating music...",
         icon: <Globe className="w-4 h-4" />,
         status: activeStep > 1 ? "done" : activeStep === 1 ? "active" : "pending",
       },
@@ -54,10 +58,16 @@ const Processing = () => {
         description: activeStep >= 3
           ? "All worlds ready"
           : activeStep === 2
-          ? `${generation?.scenes?.filter((s) => s.spz_url).length || 0}/${generation?.scenes?.length || 0} worlds ready`
+          ? `${worldsReady}/${sceneCount} worlds ready`
           : "Rendering scenes...",
         icon: <Eye className="w-4 h-4" />,
         status: activeStep >= 3 ? "done" : activeStep === 2 ? "active" : "pending",
+      },
+      {
+        label: "Experience ready",
+        description: activeStep >= 4 ? `${sceneCount} scenes, ${bgmCount} BGM tracks` : "Preparing your world...",
+        icon: <Music className="w-4 h-4" />,
+        status: activeStep >= 4 ? "done" : activeStep === 3 ? "active" : "pending",
       },
     ];
   })();
@@ -176,6 +186,7 @@ const Processing = () => {
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <Badge variant="secondary" className="text-[10px]">{scene.mood}</Badge>
+                    {scene.bgm_path && <Music className="w-3.5 h-3.5 text-muted-foreground" />}
                     {scene.spz_url && <Check className="w-3.5 h-3.5 text-primary" />}
                   </div>
                 </div>
