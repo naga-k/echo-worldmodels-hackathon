@@ -220,11 +220,19 @@ export function useGeminiLive({
     heldRef.current = !heldRef.current;
     setHeld(heldRef.current);
     if (heldRef.current) {
-      // Clear speaking state when holding
+      // Immediately silence voice output by ramping gain to 0
+      if (voiceGain && audioContext) {
+        voiceGain.gain.setValueAtTime(0, audioContext.currentTime);
+      }
       isSpeakingRef.current = false;
       setIsSpeaking(false);
+    } else {
+      // Restore voice output
+      if (voiceGain && audioContext) {
+        voiceGain.gain.setValueAtTime(1.0, audioContext.currentTime);
+      }
     }
-  }, []);
+  }, [voiceGain, audioContext]);
 
   // Cleanup on unmount
   useEffect(() => () => cleanup(), [cleanup]);

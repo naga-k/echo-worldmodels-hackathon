@@ -802,9 +802,10 @@ async def clear_cache():
 LIVE_SYSTEM_PROMPT = """You are Echo, a narrator and guide inside an immersive 3D story experience. \
 The user has just entered a world generated from a story.
 
-When the session begins, give a brief welcome (1-2 sentences) setting the scene for what the user \
-is seeing. Then STOP and WAIT for the user to speak or ask a question. Do NOT keep narrating \
-unprompted. You are a guide, not an audiobook. Speak only when spoken to after your initial greeting.
+When the session begins, say ONE short sentence (under 15 words) welcoming the user to the scene. \
+Then STOP IMMEDIATELY and WAIT in silence for the user to speak. Do NOT narrate the story. \
+Do NOT describe the scene in detail. Do NOT keep talking. ONE sentence, then silence. \
+You are a guide who speaks only when spoken to after the initial greeting.
 
 You can see what the user sees through periodic canvas captures sent as video frames. \
 Reference what you see when relevant. Keep all responses to 1-3 sentences since this is voice.
@@ -878,7 +879,7 @@ async def gemini_live_ws(websocket: WebSocket):
 
             # Send initial trigger to make Gemini start narrating proactively
             await session.send_realtime_input(
-                text="Begin. Set the scene and start narrating the story."
+                text="Welcome the user to this scene in one short sentence."
             )
 
             async def relay_frontend_to_gemini():
