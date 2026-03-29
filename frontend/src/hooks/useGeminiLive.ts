@@ -164,9 +164,12 @@ export function useGeminiLive({
         cleanup();
       };
 
-      // Start microphone capture and stream PCM to backend
+      // Start microphone capture and stream PCM to backend.
+      // Always send mic audio — Gemini Live handles turn-taking server-side
+      // and will interrupt itself when it detects the user speaking.
+      // Browser echoCancellation (audio.ts:65) prevents feedback loops.
       const stopMic = await createMicrophoneStream((pcm) => {
-        if (ws.readyState === WebSocket.OPEN && !isSpeakingRef.current) {
+        if (ws.readyState === WebSocket.OPEN) {
           ws.send(pcm);
         }
       });
