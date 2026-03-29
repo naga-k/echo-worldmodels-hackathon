@@ -28,14 +28,15 @@ export function useGeminiLive({
   const [status, setStatus] = useState<GeminiLiveStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const stopMicRef = useRef<(() => void) | null>(null);
   const playerRef = useRef<ReturnType<typeof createPCMPlayer> | null>(null);
   const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // isSpeaking gates mic sending to prevent audio feedback
   const isSpeakingRef = useRef(false);
+  const micMutedRef = useRef(false);
   // Track scene changes so we can notify Gemini without restarting
   const prevSceneIdRef = useRef(currentSceneId);
 
@@ -149,8 +150,19 @@ export function useGeminiLive({
             isSpeakingRef.current = false;
             setIsSpeaking(false);
           }, 500);
+        } else if (typeof event.data === "string") {
+          // Handle interruption: Gemini detected user speaking, stop playback
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "interrupted" || msg.interrupted) {
+              isSpeakingRef.current = false;
+              setIsSpeaking(false);
+              // PCM player will naturally stop when no new chunks arrive
+            }
+          } catch {
+            // Not JSON, ignore
+          }
         }
-        // Text messages (transcripts, status) are intentionally ignored in the UI for now
       };
 
       ws.onclose = () => {
@@ -165,11 +177,10 @@ export function useGeminiLive({
       };
 
       // Start microphone capture and stream PCM to backend.
-      // Always send mic audio — Gemini Live handles turn-taking server-side
-      // and will interrupt itself when it detects the user speaking.
-      // Browser echoCancellation (audio.ts:65) prevents feedback loops.
+      // Gemini Live handles turn-taking server-side. Mic can be muted
+      // via toggleMic() without disconnecting the session.
       const stopMic = await createMicrophoneStream((pcm) => {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState === WebSocket.OPEN && !micMutedRef.current) {
           ws.send(pcm);
         }
       });
@@ -196,6 +207,11 @@ export function useGeminiLive({
     }
   }, [storyText, scenes, canvasRef, cleanup, audioContext, voiceGain]);
 
+  const toggleMic = useCallback(() => {
+    micMutedRef.current = !micMutedRef.current;
+    setMicMuted(micMutedRef.current);
+  }, []);
+
   // Cleanup on unmount
   useEffect(() => () => cleanup(), [cleanup]);
 
@@ -204,6 +220,8 @@ export function useGeminiLive({
     error,
     start,
     stop,
+    toggleMic,
+    micMuted,
     isActive: status !== "disconnected",
     isSpeaking,
   };

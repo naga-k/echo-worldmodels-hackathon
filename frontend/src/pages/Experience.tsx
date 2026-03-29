@@ -265,13 +265,13 @@ const Experience = () => {
             <ChevronRight className="w-5 h-5" />
           </Button>
 
-          {/* Gemini voice chat */}
+          {/* Gemini voice chat — toggle mic mute, don't restart session */}
           <div className="ml-2 shrink-0">
             <VoiceChatButton
-              status={gemini.status}
+              status={gemini.micMuted ? "disconnected" : gemini.status}
               error={gemini.error}
-              onStart={gemini.start}
-              onStop={gemini.stop}
+              onStart={gemini.toggleMic}
+              onStop={gemini.toggleMic}
             />
           </div>
         </div>
