@@ -188,6 +188,7 @@ For each scene, produce:
 - time_end: Fractional end time (0.0 to 1.0) representing when this scene ends in the narration
 - camera_direction: One of "forward", "left", "right", "up", "orbit" - suggests how the camera should move through the scene
 - mood: A single word describing the mood/atmosphere for color grading (e.g., "noir", "warm", "eerie", "bright", "tense")
+- music_description: A short description of instrumental background music for this scene. Include genre, instruments, mood, tempo. Always end with "Instrumental only, no vocals."
 
 Also produce:
 - title: An overall title for the experience
@@ -207,7 +208,8 @@ Return ONLY valid JSON with this exact structure, no markdown, no explanation:
       "time_start": 0.0,
       "time_end": 0.45,
       "camera_direction": "forward",
-      "mood": "..."
+      "mood": "...",
+      "music_description": "Slow jazz piano with muted trumpet, smoky noir atmosphere, medium-slow tempo. Instrumental only, no vocals."
     }
   ]
 }
@@ -312,6 +314,69 @@ async def generate_speech(req: SpeechRequest):
             media_type="audio/mpeg",
             headers={"Content-Disposition": "inline; filename=narration.mp3"},
         )
+
+
+# ─── BGM generation via Lyria 3 Clip ───
+
+BGM_DIR = Path(os.path.dirname(__file__)) / "db" / "audio"
+
+
+async def generate_bgm(generation_id: str, scene_id: str, music_description: str) -> Optional[str]:
+    """Generate background music for a scene using Lyria 3 Clip.
+
+    Returns the file path on success, None on failure.
+    """
+    if not gemini_client or not music_description:
+        return None
+
+    # Ensure prompt ends with the instrumental-only instruction
+    prompt = music_description.strip()
+    if not prompt.endswith("Instrumental only, no vocals."):
+        prompt = f"{prompt} Instrumental only, no vocals."
+
+    cache_key = _cache_key(prompt)
+    cached = cache_get_bytes("bgm", cache_key)
+
+    if cached is None:
+        try:
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model="lyria-3-clip-preview",
+                contents=prompt,
+                config={
+                    "response_modalities": ["AUDIO"],
+                },
+            )
+
+            # Extract audio bytes from response
+            audio_data = None
+            if response.candidates:
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data and part.inline_data.data:
+                        audio_data = part.inline_data.data
+                        break
+
+            if not audio_data:
+                print(f"[bgm] No audio data in Lyria response for {scene_id}")
+                return None
+
+            cache_set_bytes("bgm", cache_key, audio_data)
+
+        except Exception as e:
+            print(f"[bgm] Lyria generation failed for {scene_id}: {e}")
+            return None
+    else:
+        audio_data = cached
+
+    # Save to db/audio/
+    try:
+        BGM_DIR.mkdir(parents=True, exist_ok=True)
+        file_path = BGM_DIR / f"bgm_{generation_id}_{scene_id}.mp3"
+        file_path.write_bytes(audio_data)
+        return str(file_path)
+    except Exception as e:
+        print(f"[bgm] Failed to save BGM file for {scene_id}: {e}")
+        return None
 
 
 # ─── POST /generate-worlds ───
@@ -530,25 +595,42 @@ async def _run_pipeline(gen_id: str, text: str):
 
         # Step 2: Skip speech (narration removed)
 
-        # Step 3: Generate worlds
+        # Step 3: Generate worlds + BGM in parallel
         update_generation(gen_id, status="building_worlds")
         if not WORLD_LABS_API_KEY:
             raise Exception("WORLD_LABS_API_KEY not configured")
 
-        worlds_key = _cache_key(*[s["marble_prompt"] for s in scenes])
-        cached_worlds = cache_get_json("worlds", worlds_key)
-
-        if cached_worlds:
-            operations = cached_worlds["operations"]
-        else:
+        # Build worlds task
+        async def _build_worlds():
+            worlds_key = _cache_key(*[s["marble_prompt"] for s in scenes])
+            cached_worlds = cache_get_json("worlds", worlds_key)
+            if cached_worlds:
+                return cached_worlds["operations"]
             async with httpx.AsyncClient(timeout=120.0) as client:
                 tasks = [
                     _generate_single_world(client, s["id"], s["marble_prompt"], "Marble 0.1-mini")
                     for s in scenes
                 ]
-                operations = await asyncio.gather(*tasks)
-            cache_set_json("worlds", worlds_key, {"operations": list(operations)})
-            operations = list(operations)
+                ops = await asyncio.gather(*tasks)
+            cache_set_json("worlds", worlds_key, {"operations": list(ops)})
+            return list(ops)
+
+        # Build BGM task (all scenes in parallel)
+        async def _build_all_bgm():
+            bgm_tasks = [
+                generate_bgm(gen_id, s["id"], s.get("music_description", ""))
+                for s in scenes
+            ]
+            return await asyncio.gather(*bgm_tasks)
+
+        # Fire worlds + BGM in parallel
+        operations, bgm_results = await asyncio.gather(_build_worlds(), _build_all_bgm())
+
+        # Store BGM paths on scene objects
+        for i, scene in enumerate(scenes):
+            bgm_path = bgm_results[i] if i < len(bgm_results) else None
+            if bgm_path:
+                scene["bgm_path"] = bgm_path
 
         op_ids = [o["operation_id"] for o in operations if "operation_id" in o]
         op_to_scene = {o["operation_id"]: o["scene_id"] for o in operations if "operation_id" in o}
@@ -658,6 +740,16 @@ async def get_generation_audio(gen_id: str):
     return FileResponse(audio_file, media_type="audio/mpeg")
 
 
+@app.get("/generations/{gen_id}/scenes/{scene_id}/bgm", tags=["Generations"],
+         summary="Get scene background music",
+         description="Serves the BGM MP3 file for a specific scene in a generation.")
+async def get_scene_bgm(gen_id: str, scene_id: str):
+    bgm_file = AUDIO_DIR / f"bgm_{gen_id}_{scene_id}.mp3"
+    if not bgm_file.exists():
+        raise HTTPException(404, "BGM not found for this scene")
+    return FileResponse(bgm_file, media_type="audio/mpeg")
+
+
 # ─── GET /samples ───
 
 SAMPLES_PATH = Path(os.path.dirname(__file__)) / "db" / "samples.json"
@@ -702,8 +794,11 @@ async def clear_cache():
 
 # ─── WebSocket /ws/gemini-live ───
 
-LIVE_SYSTEM_PROMPT = """You are Echo, a guide inside an immersive 3D story experience. \
-The user is exploring a 3D world generated from the following story:
+LIVE_SYSTEM_PROMPT = """You are Echo, a narrator and guide inside an immersive 3D story experience. \
+The user has just entered a world generated from a story. When the session begins, IMMEDIATELY \
+start by setting the scene — describe what the user is seeing in the current world, introduce \
+the atmosphere, and begin telling the story. Speak naturally and conversationally. If the user \
+speaks, pause and respond, then resume narrating. Keep responses to 1-3 sentences since this is voice.
 
 --- STORY ---
 {story_text}
@@ -713,11 +808,7 @@ The story has been divided into these scenes:
 {scenes_summary}
 
 The user is currently viewing: {current_scene_title}
-Scene description: {current_scene_desc}
-
-You can see what the user sees through periodic canvas captures sent as video frames. \
-Speak naturally and conversationally. Answer questions about the story, describe what you see, \
-and help the user explore the world. Keep responses to 1-3 sentences since this is voice."""
+Scene description: {current_scene_desc}"""
 
 
 @app.websocket("/ws/gemini-live")
@@ -775,6 +866,11 @@ async def gemini_live_ws(websocket: WebSocket):
             config=live_config,
         ) as session:
             await websocket.send_text(json.dumps({"type": "status", "message": "connected"}))
+
+            # Send initial trigger to make Gemini start narrating proactively
+            await session.send_realtime_input(
+                text="Begin. Set the scene and start narrating the story."
+            )
 
             async def relay_frontend_to_gemini():
                 """Read frontend WebSocket messages and forward to Gemini."""

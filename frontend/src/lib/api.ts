@@ -80,3 +80,7 @@ export async function listGenerations(): Promise<GenerationSummary[]> {
 export function getAudioUrl(id: string): string {
   return `${API_URL}/generations/${id}/audio`;
 }
+
+export function getBgmUrl(generationId: string, sceneId: string): string {
+  return `${API_URL}/generations/${generationId}/scenes/${sceneId}/bgm`;
+}

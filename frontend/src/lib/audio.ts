@@ -23,10 +23,11 @@ export function pcm16ToFloat32(buffer: ArrayBuffer): Float32Array {
 
 /**
  * PCM player that schedules back-to-back AudioBufferSourceNodes for gapless playback.
- * Must be created inside a user gesture handler (browser autoplay policy).
+ *
+ * Accepts an external AudioContext and GainNode so audio can be routed through
+ * a shared mixer (e.g. useAudioMixer's voiceGain) instead of straight to destination.
  */
-export function createPCMPlayer(sampleRate: number) {
-  const ctx = new AudioContext({ sampleRate });
+export function createPCMPlayer(sampleRate: number, ctx: AudioContext, gainNode: GainNode) {
   // nextPlayTime tracks when the last scheduled buffer ends, so we chain them.
   let nextPlayTime = 0;
 
@@ -36,7 +37,7 @@ export function createPCMPlayer(sampleRate: number) {
     buffer.copyToChannel(float32, 0);
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-    source.connect(ctx.destination);
+    source.connect(gainNode);
     const now = ctx.currentTime;
     // Start immediately if we've fallen behind, otherwise chain after last buffer
     const startAt = Math.max(now, nextPlayTime);
@@ -45,7 +46,7 @@ export function createPCMPlayer(sampleRate: number) {
   }
 
   function close() {
-    ctx.close();
+    // Don't close the shared AudioContext — the mixer owns it
   }
 
   return { play, close };

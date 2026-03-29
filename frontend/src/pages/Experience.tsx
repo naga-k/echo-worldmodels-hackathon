@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { getGeneration } from "@/lib/api";
+import { getGeneration, getBgmUrl } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { PanelRightOpen, PanelRightClose, BookOpen, Share2, Check, ChevronLeft, ChevronRight } from "lucide-react";
 import type { Generation } from "@/types/pipeline";
 import SceneViewer from "@/components/SceneViewer";
 import VoiceChatButton from "@/components/VoiceChatButton";
 import { useGeminiLive } from "@/hooks/useGeminiLive";
+import { useAudioMixer } from "@/hooks/useAudioMixer";
 
 const Experience = () => {
   const navigate = useNavigate();
@@ -17,6 +18,9 @@ const Experience = () => {
   const [generation, setGeneration] = useState<Generation | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [entered, setEntered] = useState(false);
+
+  const mixer = useAudioMixer();
 
   const scenes = generation?.scenes ?? [];
   const activeScene = scenes[activeSceneIndex];
@@ -26,6 +30,8 @@ const Experience = () => {
     scenes: scenes,
     currentSceneId: activeScene?.id ?? "",
     canvasRef,
+    audioContext: mixer.audioContext,
+    voiceGain: mixer.voiceGain,
   });
 
   // Load generation data
@@ -53,6 +59,62 @@ const Experience = () => {
     load();
   }, [id, navigate]);
 
+  // Handle "Enter World" click — satisfies autoplay policy via user gesture
+  const handleEnterWorld = async () => {
+    setEntered(true);
+    await mixer.resume();
+  };
+
+  // Auto-start BGM + voice guide after entering
+  useEffect(() => {
+    if (!entered || !id || !activeScene) return;
+
+    // Start BGM for the current scene
+    const bgmUrl = getBgmUrl(id, activeScene.id);
+    mixer.startBgm(bgmUrl);
+
+    // Auto-connect Gemini Live voice guide
+    gemini.start();
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entered]);
+
+  // Ducking: when Gemini is speaking, duck BGM; when it stops, restore
+  useEffect(() => {
+    if (!entered) return;
+    if (gemini.isSpeaking) {
+      mixer.duckBgm();
+    } else {
+      mixer.unduckBgm();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gemini.isSpeaking, entered]);
+
+  // On scene change: switch BGM to the new scene
+  const prevSceneIndexRef = useRef(activeSceneIndex);
+  useEffect(() => {
+    if (!entered || !id) return;
+    if (prevSceneIndexRef.current === activeSceneIndex) return;
+    prevSceneIndexRef.current = activeSceneIndex;
+
+    const scene = scenes[activeSceneIndex];
+    if (scene) {
+      mixer.stopBgm();
+      const bgmUrl = getBgmUrl(id, scene.id);
+      mixer.startBgm(bgmUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSceneIndex, entered, id, scenes]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      mixer.cleanup();
+      gemini.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const prevScene = () => setActiveSceneIndex((i) => Math.max(0, i - 1));
   const nextScene = () => setActiveSceneIndex((i) => Math.min(scenes.length - 1, i + 1));
 
@@ -66,6 +128,17 @@ const Experience = () => {
     return (
       <div className="h-screen flex items-center justify-center">
         <p className="text-muted-foreground">Loading experience...</p>
+      </div>
+    );
+  }
+
+  // "Enter World" gate — shown before the immersive experience
+  if (!entered) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-background">
+        <h1 className="text-4xl font-display font-bold text-gradient mb-4">{generation.title}</h1>
+        <p className="text-muted-foreground mb-8">Ready to step inside</p>
+        <Button variant="hero" size="lg" onClick={handleEnterWorld}>Enter World</Button>
       </div>
     );
   }

@@ -12,6 +12,9 @@ interface UseGeminiLiveOptions {
   scenes: Scene[];
   currentSceneId: string;
   canvasRef: { current: HTMLCanvasElement | null };
+  /** If provided, PCM player routes through this shared AudioContext + GainNode instead of creating its own. */
+  audioContext?: AudioContext | null;
+  voiceGain?: GainNode | null;
 }
 
 export function useGeminiLive({
@@ -19,9 +22,12 @@ export function useGeminiLive({
   scenes,
   currentSceneId,
   canvasRef,
+  audioContext,
+  voiceGain,
 }: UseGeminiLiveOptions) {
   const [status, setStatus] = useState<GeminiLiveStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const stopMicRef = useRef<(() => void) | null>(null);
@@ -66,6 +72,7 @@ export function useGeminiLive({
       wsRef.current = null;
     }
     isSpeakingRef.current = false;
+    setIsSpeaking(false);
   }, []);
 
   const stop = useCallback(() => {
@@ -78,9 +85,17 @@ export function useGeminiLive({
     setStatus("connecting");
     setError(null);
 
-    // AudioContext must be created inside a user gesture (browser autoplay policy).
-    // The mic button click IS that gesture, so this is safe here.
-    const player = createPCMPlayer(24000);
+    // Use the shared AudioContext + voiceGain from the mixer if provided,
+    // otherwise fall back to creating a standalone context (for backward compat).
+    let player: ReturnType<typeof createPCMPlayer>;
+    if (audioContext && voiceGain) {
+      player = createPCMPlayer(24000, audioContext, voiceGain);
+    } else {
+      const ctx = new AudioContext({ sampleRate: 24000 });
+      const gain = ctx.createGain();
+      gain.connect(ctx.destination);
+      player = createPCMPlayer(24000, ctx, gain);
+    }
     playerRef.current = player;
 
     const ws = new WebSocket(`${WS_BASE}/ws/gemini-live`);
@@ -126,11 +141,13 @@ export function useGeminiLive({
         if (event.data instanceof ArrayBuffer) {
           // Binary = 16-bit PCM audio response from Gemini at 24kHz
           isSpeakingRef.current = true;
+          setIsSpeaking(true);
           playerRef.current?.play(pcm16ToFloat32(event.data));
           // Reset speaking flag 500ms after the last audio chunk arrives
           if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
           speakingTimerRef.current = setTimeout(() => {
             isSpeakingRef.current = false;
+            setIsSpeaking(false);
           }, 500);
         }
         // Text messages (transcripts, status) are intentionally ignored in the UI for now
@@ -174,7 +191,7 @@ export function useGeminiLive({
       setStatus("error");
       cleanup();
     }
-  }, [storyText, scenes, canvasRef, cleanup]);
+  }, [storyText, scenes, canvasRef, cleanup, audioContext, voiceGain]);
 
   // Cleanup on unmount
   useEffect(() => () => cleanup(), [cleanup]);
@@ -185,5 +202,6 @@ export function useGeminiLive({
     start,
     stop,
     isActive: status !== "disconnected",
+    isSpeaking,
   };
 }
