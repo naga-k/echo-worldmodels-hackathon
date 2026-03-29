@@ -71,6 +71,7 @@ Good Echo sources by genre:
 2. Find chapter/section boundaries with grep
 3. Strip boilerplate headers/footers (Gutenberg `*** START/END ***`, etc.)
 4. Extract the requested section with sed
+5. **Verify the end of the extracted text** — read the last 10 lines and make sure it doesn't include the start of the next chapter, page numbers, or other junk. Trim if needed. This is a common mistake with sed range extraction where the end boundary captures a few lines too many.
 
 ### For HTML pages
 1. Fetch with WebFetch or curl
@@ -79,8 +80,9 @@ Good Echo sources by genre:
 
 ### For PDFs
 1. Download to `/tmp/`
-2. Convert with `pdftotext -f {start_page} -l {end_page} input.pdf output.txt`
-3. Clean up the extracted text
+2. Convert the full PDF with `pdftotext input.pdf output.txt` (page-range extraction often misses chapter boundaries that don't align to page breaks)
+3. Find chapter boundaries in the extracted text with grep, then use sed/head/tail to extract
+4. **Always verify the tail** — read the last 10 lines of the output and trim any next-chapter headings, page numbers, or blank lines that leaked in
 
 ## Saving
 
