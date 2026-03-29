@@ -8,19 +8,25 @@ Paste a story, step inside it. Text gets decomposed into scenes, each scene beco
 worldlabs/
 ├── backend/          Python FastAPI server (port 8002)
 │   ├── main.py       All API endpoints
+│   ├── db.py         SQLite persistence layer
+│   ├── db/           Data directory (echo.db, audio/, samples)
 │   ├── test_api.py   End-to-end test script
 │   └── requirements.txt
-├── frontend/         React/SparkJS viewer (teammate's domain)
+├── frontend/         React/SparkJS viewer (port 8080)
 ├── src/              Legacy Next.js app (single-scene, kept as reference)
 └── .env              API keys (not committed)
 ```
 
-Backend and frontend are fully separated. Backend exposes REST JSON API, frontend consumes it.
+Backend and frontend are fully separated. Backend exposes REST JSON API, frontend consumes it via Vite proxy (`/api` → `localhost:8002`).
 
 ## Backend API Endpoints
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
+| `/generations` | POST | Create generation — starts full pipeline as background task |
+| `/generations` | GET | List all generations (gallery) |
+| `/generations/:id` | GET | Get generation status + data |
+| `/generations/:id/audio` | GET | Stream narration MP3 |
 | `/extract-scenes` | POST | Gemini decomposes story text into 2-5 scene JSON with Marble-optimized prompts |
 | `/generate-speech` | POST | ElevenLabs TTS, returns MP3 binary |
 | `/generate-worlds` | POST | Fires parallel Marble API requests, returns operation IDs |
@@ -56,16 +62,15 @@ cd backend && python test_api.py
 ## Pipeline Flow
 
 ```
-Text → POST /extract-scenes → scene JSON (prompts, timestamps, camera dirs)
-     → POST /generate-speech → MP3 audio
-     → POST /generate-worlds → operation IDs (parallel)
-     → GET /poll-worlds (loop) → SPZ URLs when ready
-     → Frontend loads SPZ files in SparkJS, syncs camera to audio
+Text → POST /generations → backend runs full pipeline as background task:
+     → Extract scenes (Gemini) → Generate speech (ElevenLabs) → Build worlds (Marble, parallel) → Poll until ready
+     → Frontend polls GET /generations/:id for status updates
+     → Experience page loads SPZ files in SparkJS, syncs camera to audio
 ```
 
 ## Conventions
 
-- Backend is Python (FastAPI + httpx + google-genai), no ORM, no database
+- Backend is Python (FastAPI + httpx + google-genai), SQLite for persistence (WAL mode)
 - Frontend is React + THREE.js + SparkJS (@sparkjsdev/spark) for Gaussian splat rendering
 - All API keys loaded from root `.env` via python-dotenv
 - Never commit `.env` or API keys

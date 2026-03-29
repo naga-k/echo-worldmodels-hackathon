@@ -20,6 +20,7 @@ Text  -->  Gemini extracts scenes  -->  ElevenLabs narrates  -->  Marble generat
 4. **3D world generation** — World Labs Marble API creates Gaussian splat environments for each scene in parallel
 5. **Immersive experience** — Navigate the 3D worlds with WASD controls while narration plays, scenes transition automatically synced to audio timestamps
 6. **Voice chat** — Talk to an AI guide (Gemini Live) that can see your scene and answer questions about the story
+7. **Gallery** — Browse and revisit all past generations
 
 ## Demo
 
@@ -35,6 +36,7 @@ Try it with public domain classics — Sherlock Holmes, Poe, Dracula, or Jules V
 | Voice Chat | Gemini Live API with bidirectional audio + video streaming |
 | Narration | ElevenLabs TTS (`eleven_multilingual_v2`, "Adam" voice) |
 | Frontend | React + TypeScript + Vite + Tailwind + shadcn/ui |
+| Persistence | SQLite (WAL mode) — generations, audio files |
 | Backend | Python FastAPI + httpx + uvicorn |
 
 ## Architecture
@@ -43,16 +45,20 @@ Try it with public domain classics — Sherlock Holmes, Poe, Dracula, or Jules V
 worldlabs/
 ├── backend/             Python FastAPI server (port 8002)
 │   ├── main.py          All API endpoints + WebSocket
-│   ├── db/samples.json  Sample stories database
+│   ├── db.py            SQLite persistence layer
+│   ├── db/              Data directory (auto-created)
+│   │   ├── echo.db      Generation database
+│   │   ├── audio/       Stored narration MP3s
+│   │   └── samples.json Sample stories
 │   ├── test_api.py      End-to-end test script
 │   └── requirements.txt
 ├── frontend/            React + SparkJS viewer (port 8080)
 │   └── src/
-│       ├── pages/       Index, Processing pipeline, Experience viewer
+│       ├── pages/       Index, Processing, Experience, Gallery
 │       ├── components/  SceneViewer (3D), VoiceChatButton
 │       ├── hooks/       useGeminiLive (voice chat)
 │       └── lib/         API client, audio utilities
-├── run.sh               Start both servers in parallel
+├── run.sh               Start backend, frontend, and optional Cloudflare tunnel
 └── .env                 API keys (not committed)
 ```
 
@@ -71,7 +77,7 @@ WORLD_LABS_API_KEY=your_worldlabs_key
 ### Run
 
 ```bash
-# Both servers at once
+# Both servers at once (+ optional Cloudflare tunnel for sharing)
 ./run.sh
 
 # Or separately:
@@ -89,13 +95,20 @@ cd frontend
 npm install
 npm run dev
 # http://localhost:8080
+
+# Optional: install cloudflared to share via public URL
+brew install cloudflared
 ```
 
 ## API Endpoints
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/extract-scenes` | POST | Gemini decomposes story text into scene JSON with Marble prompts, timestamps, camera directions |
+| `/generations` | POST | Create a new generation — kicks off the full pipeline as a background task |
+| `/generations` | GET | List all generations (gallery) |
+| `/generations/:id` | GET | Get generation status, scenes, and metadata |
+| `/generations/:id/audio` | GET | Stream the narration MP3 |
+| `/extract-scenes` | POST | Gemini decomposes story text into scene JSON (also used internally) |
 | `/generate-speech` | POST | ElevenLabs TTS, returns MP3 audio |
 | `/generate-worlds` | POST | Fires parallel Marble API requests, returns operation IDs |
 | `/poll-worlds` | GET | Polls Marble operations, returns status + SPZ URLs |
@@ -108,19 +121,24 @@ npm run dev
 ```
 User pastes text
     ↓
-POST /extract-scenes → scene JSON (prompts, timestamps, camera dirs, moods)
-    ↓                          ↓
-POST /generate-speech    POST /generate-worlds (parallel per scene)
-    ↓                          ↓
-MP3 audio blob           GET /poll-worlds (loop until ready)
-    ↓                          ↓
-    └──────────────────────────┘
-                ↓
+POST /generations → creates generation record, starts background pipeline
+    ↓
+    Backend runs automatically:
+    1. Extract scenes (Gemini)
+    2. Generate narration (ElevenLabs)
+    3. Build 3D worlds (Marble, parallel)
+    4. Poll until all worlds ready
+    ↓
+    Frontend polls GET /generations/:id for progress
+    ↓
     Experience page loads:
     - SparkJS renders SPZ Gaussian splats
     - Audio plays with scene transitions synced to timestamps
     - WASD/mouse navigation through 3D worlds
     - Gemini Live voice chat available via mic button
+    ↓
+    Shareable URL: /experience/:id
+    Gallery: /gallery shows all past generations
 ```
 
 ## Controls
