@@ -53,3 +53,35 @@ export interface PipelineData {
   scenes: Scene[];
   audioBlobUrl: string;
 }
+
+export type GenerationStatus =
+  | "pending"
+  | "extracting"
+  | "generating_speech"
+  | "building_worlds"
+  | "polling"
+  | "completed"
+  | "failed";
+
+export interface Generation {
+  id: string;
+  status: GenerationStatus;
+  title: string | null;
+  input_text: string;
+  narration_text: string | null;
+  scenes: Scene[];
+  operations: any[];
+  audio_path: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GenerationSummary {
+  id: string;
+  status: GenerationStatus;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+  scene_count: number;
+}

@@ -1,15 +1,14 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
-import { usePipeline } from "@/context/PipelineContext";
+import { useNavigate, Link } from "react-router-dom";
 import { sampleStories } from "@/lib/samples";
-import { fetchSamples, type SampleStory } from "@/lib/api";
+import { fetchSamples, createGeneration, type SampleStory } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { BookOpen } from "lucide-react";
+import { BookOpen, LayoutGrid } from "lucide-react";
 
 const Index = () => {
   const navigate = useNavigate();
-  const { setInputText } = usePipeline();
   const [text, setText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [samples, setSamples] = useState<SampleStory[]>([]);
 
   useEffect(() => {
@@ -18,16 +17,31 @@ const Index = () => {
       .catch(() => setSamples([]));
   }, []);
 
-  const handleSubmit = () => {
-    if (!text.trim()) return;
-    setInputText(text.trim());
-    navigate("/processing");
+  const handleSubmit = async () => {
+    if (!text.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      const { id } = await createGeneration(text.trim());
+      navigate(`/processing/${id}`);
+    } catch (err) {
+      console.error("Failed to create generation:", err);
+      setSubmitting(false);
+    }
   };
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-4 py-16 relative overflow-hidden">
       {/* Ambient glow */}
       <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[400px] bg-primary/5 rounded-full blur-[120px] pointer-events-none" />
+
+      {/* Gallery link */}
+      <Link
+        to="/gallery"
+        className="absolute top-4 right-4 flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <LayoutGrid className="w-4 h-4" />
+        Gallery
+      </Link>
 
       <div className="w-full max-w-2xl mx-auto relative z-10 flex flex-col items-center">
         {/* Hero */}
@@ -45,16 +59,17 @@ const Index = () => {
           placeholder="Paste a story, transcript, or description here..."
           rows={7}
           className="w-full rounded-lg bg-card border border-border p-4 text-foreground placeholder:text-muted-foreground resize-none focus:outline-none focus:ring-2 focus:ring-ring transition-shadow text-sm leading-relaxed mb-4"
+          disabled={submitting}
         />
 
         <Button
           variant="hero"
           size="lg"
           onClick={handleSubmit}
-          disabled={!text.trim()}
+          disabled={!text.trim() || submitting}
           className="w-full sm:w-auto min-w-[200px] mb-14"
         >
-          Step Inside
+          {submitting ? "Creating..." : "Step Inside"}
         </Button>
 
         {/* Sample stories */}

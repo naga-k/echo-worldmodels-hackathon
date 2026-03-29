@@ -1,10 +1,10 @@
 import { useEffect, useState, useRef } from "react";
-import { useNavigate } from "react-router-dom";
-import { usePipeline } from "@/context/PipelineContext";
-import { extractScenes, generateSpeech, generateWorlds, pollWorlds } from "@/lib/api";
-import type { Scene } from "@/types/pipeline";
-import { Check, Loader2, Music, Globe, Eye, Sparkles } from "lucide-react";
+import { useNavigate, useParams } from "react-router-dom";
+import { getGeneration } from "@/lib/api";
+import type { Generation, Scene } from "@/types/pipeline";
+import { Check, Loader2, Globe, Eye, Sparkles, AlertCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 type StepStatus = "pending" | "active" | "done" | "error";
 
@@ -13,115 +13,93 @@ interface Step {
   description: string;
   icon: React.ReactNode;
   status: StepStatus;
-  error?: string;
 }
+
+const STATUS_TO_STEP: Record<string, number> = {
+  pending: 0,
+  extracting: 0,
+  generating_speech: 1,
+  building_worlds: 1,
+  polling: 2,
+  completed: 3,
+  failed: -1,
+};
 
 const Processing = () => {
   const navigate = useNavigate();
-  const { inputText, setPipelineData } = usePipeline();
-  const [steps, setSteps] = useState<Step[]>([
-    { label: "Extracting scenes", description: "Analyzing your story...", icon: <Sparkles className="w-4 h-4" />, status: "pending" },
-    { label: "Generating narration", description: "Creating voice-over...", icon: <Music className="w-4 h-4" />, status: "pending" },
-    { label: "Building worlds", description: "Constructing 3D environments...", icon: <Globe className="w-4 h-4" />, status: "pending" },
-    { label: "Waiting for worlds", description: "Rendering scenes...", icon: <Eye className="w-4 h-4" />, status: "pending" },
-  ]);
-  const [scenes, setScenes] = useState<Scene[]>([]);
-  const [storyTitle, setStoryTitle] = useState("");
-  const hasStarted = useRef(false);
+  const { id } = useParams<{ id: string }>();
+  const [generation, setGeneration] = useState<Generation | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const updateStep = (index: number, update: Partial<Step>) => {
-    setSteps((prev) => prev.map((s, i) => (i === index ? { ...s, ...update } : s)));
-  };
+  const steps: Step[] = (() => {
+    const activeStep = generation ? STATUS_TO_STEP[generation.status] ?? -1 : -1;
+    const isFailed = generation?.status === "failed";
+
+    return [
+      {
+        label: "Extracting scenes",
+        description: activeStep > 0 ? `${generation?.scenes?.length || 0} scenes found` : "Analyzing your story...",
+        icon: <Sparkles className="w-4 h-4" />,
+        status: isFailed && activeStep === -1 ? "error" : activeStep > 0 ? "done" : activeStep === 0 ? "active" : "pending",
+      },
+      {
+        label: "Building worlds",
+        description: activeStep > 1 ? `${generation?.scenes?.length || 0} worlds queued` : "Constructing 3D environments...",
+        icon: <Globe className="w-4 h-4" />,
+        status: activeStep > 1 ? "done" : activeStep === 1 ? "active" : "pending",
+      },
+      {
+        label: "Waiting for worlds",
+        description: activeStep >= 3
+          ? "All worlds ready"
+          : activeStep === 2
+          ? `${generation?.scenes?.filter((s) => s.spz_url).length || 0}/${generation?.scenes?.length || 0} worlds ready`
+          : "Rendering scenes...",
+        icon: <Eye className="w-4 h-4" />,
+        status: activeStep >= 3 ? "done" : activeStep === 2 ? "active" : "pending",
+      },
+    ];
+  })();
 
   useEffect(() => {
-    if (!inputText || hasStarted.current) {
-      if (!inputText) navigate("/");
+    if (!id) {
+      navigate("/");
       return;
     }
-    hasStarted.current = true;
 
-    const run = async () => {
+    const poll = async () => {
       try {
-        // Step 1
-        updateStep(0, { status: "active" });
-        const extracted = await extractScenes(inputText);
-        setScenes(extracted.scenes);
-        setStoryTitle(extracted.title);
-        updateStep(0, { status: "done", description: `${extracted.scenes.length} scenes found` });
+        const gen = await getGeneration(id);
+        setGeneration(gen);
 
-        // Step 2
-        updateStep(1, { status: "active" });
-        const audioBlobUrl = await generateSpeech(extracted.narration_text);
-        updateStep(1, { status: "done", description: "Audio ready" });
-
-        // Step 3
-        updateStep(2, { status: "active" });
-        const worldsRes = await generateWorlds(
-          extracted.scenes.map((s) => ({ id: s.id, marble_prompt: s.marble_prompt })),
-          "Marble 0.1-plus"
-        );
-        updateStep(2, { status: "done", description: `${worldsRes.operations.length} worlds queued` });
-
-        // Step 4
-        updateStep(3, { status: "active" });
-        const opIds = worldsRes.operations.map((o) => o.operation_id);
-        const opToScene = new Map(worldsRes.operations.map((o) => [o.operation_id, o.scene_id]));
-
-        let allReady = false;
-        let finalScenes = [...extracted.scenes];
-
-        while (!allReady) {
-          const pollRes = await pollWorlds(opIds);
-          allReady = pollRes.scenes.every((s) => s.status !== "generating");
-
-          for (const ps of pollRes.scenes) {
-            if (ps.spz_url) {
-              const sceneId = opToScene.get(ps.operation_id);
-              finalScenes = finalScenes.map((s) =>
-                s.id === sceneId ? {
-                  ...s,
-                  spz_url: ps.spz_url,
-                  collider_mesh_url: ps.collider_mesh_url,
-                  semantics: ps.semantics,
-                } : s
-              );
-            }
-          }
-          setScenes(finalScenes);
-
-          const readyCount = pollRes.scenes.filter((s) => s.status === "ready").length;
-          updateStep(3, { description: `${readyCount}/${pollRes.scenes.length} worlds ready` });
-
-          if (!allReady) await new Promise((r) => setTimeout(r, 5000));
+        if (gen.status === "completed") {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setTimeout(() => navigate(`/experience/${id}`), 800);
+        } else if (gen.status === "failed") {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setError(gen.error || "Generation failed");
         }
-
-        updateStep(3, { status: "done", description: "All worlds ready" });
-
-        setPipelineData({
-          title: extracted.title,
-          narration_text: extracted.narration_text,
-          scenes: finalScenes,
-          audioBlobUrl,
-        });
-
-        setTimeout(() => navigate("/experience"), 800);
-      } catch (err: any) {
-        const activeIdx = steps.findIndex((s) => s.status === "active");
-        if (activeIdx >= 0) {
-          updateStep(activeIdx, { status: "error", description: err.message || "Something went wrong" });
-        }
+      } catch (err) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        setError("Failed to load generation");
       }
     };
 
-    run();
-  }, [inputText]);
+    poll();
+    pollRef.current = setInterval(poll, 3000);
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [id, navigate]);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-4 py-16">
       <div className="w-full max-w-xl mx-auto">
-        {storyTitle && (
+        {generation?.title && (
           <h2 className="font-display text-2xl text-foreground mb-8 text-center animate-fade-in-up">
-            {storyTitle}
+            {generation.title}
           </h2>
         )}
 
@@ -129,7 +107,6 @@ const Processing = () => {
         <div className="space-y-1 mb-10">
           {steps.map((step, i) => (
             <div key={i} className="flex items-start gap-4">
-              {/* Icon column */}
               <div className="flex flex-col items-center">
                 <div
                   className={`w-9 h-9 rounded-full flex items-center justify-center border transition-all duration-300 ${
@@ -146,6 +123,8 @@ const Processing = () => {
                     <Check className="w-4 h-4" />
                   ) : step.status === "active" ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : step.status === "error" ? (
+                    <AlertCircle className="w-4 h-4" />
                   ) : (
                     step.icon
                   )}
@@ -156,8 +135,6 @@ const Processing = () => {
                   }`} />
                 )}
               </div>
-
-              {/* Text */}
               <div className="pt-1.5">
                 <p className={`text-sm font-medium ${
                   step.status === "active" ? "text-foreground" :
@@ -173,12 +150,22 @@ const Processing = () => {
           ))}
         </div>
 
+        {/* Error state */}
+        {error && (
+          <div className="rounded-lg bg-destructive/10 border border-destructive/30 p-4 mb-6 text-center">
+            <p className="text-sm text-destructive mb-3">{error}</p>
+            <Button variant="outline" size="sm" onClick={() => navigate("/")}>
+              Try Again
+            </Button>
+          </div>
+        )}
+
         {/* Scene preview cards */}
-        {scenes.length > 0 && (
+        {generation?.scenes && generation.scenes.length > 0 && (
           <div className="animate-fade-in-up">
             <p className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Scenes</p>
             <div className="grid gap-2">
-              {scenes.map((scene) => (
+              {generation.scenes.map((scene) => (
                 <div
                   key={scene.id}
                   className="rounded-lg bg-card border border-border p-3 flex items-start justify-between gap-3"

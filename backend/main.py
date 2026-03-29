@@ -2,11 +2,14 @@ import os
 import json
 import asyncio
 import hashlib
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 import base64
+
+from db import init_db, create_generation, get_generation, update_generation, list_generations as db_list_generations, AUDIO_DIR
 
 import httpx
 from google import genai
@@ -14,7 +17,7 @@ from google.genai import types as genai_types
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 
 # Load env from parent directory's .env
@@ -81,6 +84,8 @@ async def lifespan(app: FastAPI):
     if missing:
         print(f"\n⚠️  Missing env vars: {', '.join(missing)}")
         print("   Some endpoints will return errors. Check your .env file.\n")
+    init_db()
+    print("✅ Database initialized")
     yield
 
 
@@ -479,6 +484,178 @@ async def poll_worlds(operation_ids: str):
     if all_done:
         cache_set_json("poll", key, result)
     return result
+
+
+# ─── Generations (persistent pipeline) ───
+
+_active_pipelines: dict[str, asyncio.Task] = {}
+
+
+class CreateGenerationRequest(BaseModel):
+    text: str
+
+
+async def _run_pipeline(gen_id: str, text: str):
+    """Run the full extract → speech → worlds → poll pipeline as a background task."""
+    try:
+        # Step 1: Extract scenes
+        update_generation(gen_id, status="extracting")
+        if not gemini_client:
+            raise Exception("GEMINI_API_KEY not configured")
+
+        key = _cache_key(text)
+        cached = cache_get_json("extract", key)
+        if cached:
+            extracted = cached
+        else:
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model="gemini-3-flash-preview",
+                contents=f"{EXTRACTION_PROMPT}\n\nInput text:\n{text}",
+                config={"response_mime_type": "application/json"},
+            )
+            extracted = json.loads(response.text.strip())
+            if "scenes" not in extracted or not extracted["scenes"]:
+                raise Exception("No scenes extracted")
+            cache_set_json("extract", key, extracted)
+
+        scenes = extracted["scenes"]
+        update_generation(
+            gen_id,
+            status="generating_speech",
+            title=extracted.get("title"),
+            narration_text=extracted.get("narration_text", ""),
+            scenes=scenes,
+        )
+
+        # Step 2: Skip speech (narration removed)
+
+        # Step 3: Generate worlds
+        update_generation(gen_id, status="building_worlds")
+        if not WORLD_LABS_API_KEY:
+            raise Exception("WORLD_LABS_API_KEY not configured")
+
+        worlds_key = _cache_key(*[s["marble_prompt"] for s in scenes])
+        cached_worlds = cache_get_json("worlds", worlds_key)
+
+        if cached_worlds:
+            operations = cached_worlds["operations"]
+        else:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                tasks = [
+                    _generate_single_world(client, s["id"], s["marble_prompt"], "Marble 0.1-mini")
+                    for s in scenes
+                ]
+                operations = await asyncio.gather(*tasks)
+            cache_set_json("worlds", worlds_key, {"operations": list(operations)})
+            operations = list(operations)
+
+        op_ids = [o["operation_id"] for o in operations if "operation_id" in o]
+        op_to_scene = {o["operation_id"]: o["scene_id"] for o in operations if "operation_id" in o}
+        update_generation(gen_id, status="polling", operations=operations)
+
+        # Step 4: Poll until all worlds ready
+        max_attempts = 120
+        for attempt in range(max_attempts):
+            poll_key = _cache_key(*sorted(op_ids))
+            cached_poll = cache_get_json("poll", poll_key)
+
+            if cached_poll:
+                poll_results = cached_poll["scenes"]
+            else:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    async def poll_one(operation_id: str) -> dict:
+                        response = await client.get(
+                            f"{MARBLE_BASE}/operations/{operation_id}",
+                            headers={"WLT-Api-Key": WORLD_LABS_API_KEY},
+                        )
+                        if response.status_code != 200:
+                            return {"operation_id": operation_id, "status": "error", "spz_url": None}
+                        data = response.json()
+                        if data.get("done") or data.get("status") == "SUCCEEDED":
+                            spz_url = _extract_spz_url(data)
+                            resp_data = data.get("response") or data.get("result") or {}
+                            assets = resp_data.get("assets", {}) if isinstance(resp_data, dict) else {}
+                            mesh = assets.get("mesh", {}) or {}
+                            splats = assets.get("splats", {}) or {}
+                            return {
+                                "operation_id": operation_id, "status": "ready",
+                                "spz_url": spz_url,
+                                "collider_mesh_url": mesh.get("collider_mesh_url"),
+                                "semantics": splats.get("semantics_metadata"),
+                            }
+                        if data.get("error") or data.get("status") == "FAILED":
+                            return {"operation_id": operation_id, "status": "failed", "spz_url": None}
+                        return {"operation_id": operation_id, "status": "generating", "spz_url": None}
+
+                    poll_results = await asyncio.gather(*[poll_one(oid) for oid in op_ids])
+                    poll_results = list(poll_results)
+
+            all_done = all(r["status"] in ("ready", "failed", "error") for r in poll_results)
+
+            # Update scenes with SPZ URLs
+            for pr in poll_results:
+                if pr.get("spz_url"):
+                    scene_id = op_to_scene.get(pr["operation_id"])
+                    for s in scenes:
+                        if s["id"] == scene_id:
+                            s["spz_url"] = pr["spz_url"]
+                            s["collider_mesh_url"] = pr.get("collider_mesh_url")
+                            s["semantics"] = pr.get("semantics")
+
+            update_generation(gen_id, scenes=scenes)
+
+            if all_done:
+                cache_set_json("poll", _cache_key(*sorted(op_ids)), {"scenes": poll_results})
+                break
+
+            await asyncio.sleep(5)
+
+        update_generation(gen_id, status="completed")
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[pipeline] Generation {gen_id} failed: {e}\n{tb}")
+        update_generation(gen_id, status="failed", error=str(e) or f"{type(e).__name__}: {tb[-200:]}")
+    finally:
+        _active_pipelines.pop(gen_id, None)
+
+
+@app.post("/generations", tags=["Generations"], summary="Start a new generation",
+          description="Creates a generation and runs the full pipeline in the background.")
+async def create_generation_endpoint(req: CreateGenerationRequest):
+    if not req.text.strip():
+        raise HTTPException(400, "Text is required")
+    gen_id = uuid.uuid4().hex[:12]
+    create_generation(gen_id, req.text.strip())
+    task = asyncio.create_task(_run_pipeline(gen_id, req.text.strip()))
+    _active_pipelines[gen_id] = task
+    return {"id": gen_id}
+
+
+@app.get("/generations", tags=["Generations"], summary="List all generations",
+         description="Returns a summary list of all generations for the gallery.")
+async def list_generations_endpoint():
+    return db_list_generations()
+
+
+@app.get("/generations/{gen_id}", tags=["Generations"], summary="Get generation details",
+         description="Returns full status and data for a generation.")
+async def get_generation_endpoint(gen_id: str):
+    gen = get_generation(gen_id)
+    if not gen:
+        raise HTTPException(404, "Generation not found")
+    return gen
+
+
+@app.get("/generations/{gen_id}/audio", tags=["Generations"], summary="Get generation audio",
+         description="Serves the MP3 audio file for a generation.")
+async def get_generation_audio(gen_id: str):
+    audio_file = AUDIO_DIR / f"{gen_id}.mp3"
+    if not audio_file.exists():
+        raise HTTPException(404, "Audio not found")
+    return FileResponse(audio_file, media_type="audio/mpeg")
 
 
 # ─── GET /samples ───

@@ -1,98 +1,74 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
-import { usePipeline } from "@/context/PipelineContext";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { getGeneration } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Play, Pause, PanelRightOpen, PanelRightClose, BookOpen } from "lucide-react";
-import type { Scene } from "@/types/pipeline";
+import { PanelRightOpen, PanelRightClose, BookOpen, Share2, Check, ChevronLeft, ChevronRight } from "lucide-react";
+import type { Generation } from "@/types/pipeline";
 import SceneViewer from "@/components/SceneViewer";
 import VoiceChatButton from "@/components/VoiceChatButton";
 import { useGeminiLive } from "@/hooks/useGeminiLive";
 
 const Experience = () => {
   const navigate = useNavigate();
-  const { pipelineData } = usePipeline();
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const { id } = useParams<{ id: string }>();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
   const [activeSceneIndex, setActiveSceneIndex] = useState(0);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [generation, setGeneration] = useState<Generation | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
 
-  const activeScene = pipelineData?.scenes[activeSceneIndex];
+  const scenes = generation?.scenes ?? [];
+  const activeScene = scenes[activeSceneIndex];
 
   const gemini = useGeminiLive({
-    storyText: pipelineData?.narration_text ?? "",
-    scenes: pipelineData?.scenes ?? [],
+    storyText: generation?.narration_text ?? "",
+    scenes: scenes,
     currentSceneId: activeScene?.id ?? "",
     canvasRef,
   });
 
-  // Pause narration while voice chat is active so the two don't overlap
+  // Load generation data
   useEffect(() => {
-    if (gemini.isActive && audioRef.current && isPlaying) {
-      audioRef.current.pause();
-      setIsPlaying(false);
-    }
-  }, [gemini.isActive, isPlaying]);
-
-  useEffect(() => {
-    if (!pipelineData) {
+    if (!id) {
       navigate("/");
       return;
     }
-    const audio = new Audio(pipelineData.audioBlobUrl);
-    audioRef.current = audio;
 
-    audio.addEventListener("loadedmetadata", () => setDuration(audio.duration));
-    audio.addEventListener("timeupdate", () => setCurrentTime(audio.currentTime));
-    audio.addEventListener("ended", () => setIsPlaying(false));
-
-    return () => {
-      audio.pause();
-      audio.src = "";
+    const load = async () => {
+      try {
+        const gen = await getGeneration(id);
+        if (gen.status !== "completed") {
+          navigate(`/processing/${id}`);
+          return;
+        }
+        setGeneration(gen);
+      } catch {
+        navigate("/");
+      } finally {
+        setLoading(false);
+      }
     };
-  }, [pipelineData]);
 
-  // Sync scene to audio time
-  useEffect(() => {
-    if (!pipelineData || !duration) return;
-    const scenes = pipelineData.scenes;
-    const frac = currentTime / duration;
-    const idx = scenes.findIndex((s) => frac >= s.time_start && frac < s.time_end);
-    if (idx >= 0) setActiveSceneIndex(idx);
-  }, [currentTime, duration, pipelineData]);
+    load();
+  }, [id, navigate]);
 
-  const togglePlay = useCallback(() => {
-    if (!audioRef.current) return;
-    if (isPlaying) {
-      audioRef.current.pause();
-    } else {
-      audioRef.current.play();
-    }
-    setIsPlaying(!isPlaying);
-  }, [isPlaying]);
+  const prevScene = () => setActiveSceneIndex((i) => Math.max(0, i - 1));
+  const nextScene = () => setActiveSceneIndex((i) => Math.min(scenes.length - 1, i + 1));
 
-  const seekTo = (frac: number) => {
-    if (!audioRef.current || !duration) return;
-    audioRef.current.currentTime = frac * duration;
+  const shareLink = () => {
+    navigator.clipboard.writeText(window.location.href);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
-  const jumpToScene = (scene: Scene) => {
-    seekTo(scene.time_start);
-    if (!isPlaying) {
-      audioRef.current?.play();
-      setIsPlaying(true);
-    }
-  };
-
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, "0")}`;
-  };
-
-  if (!pipelineData) return null;
+  if (loading || !generation) {
+    return (
+      <div className="h-screen flex items-center justify-center">
+        <p className="text-muted-foreground">Loading experience...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen w-screen relative overflow-hidden bg-background">
@@ -117,14 +93,19 @@ const Experience = () => {
         <Button variant="glass" size="sm" onClick={() => navigate("/")} className="pointer-events-auto">
           <BookOpen className="w-4 h-4 mr-1.5" /> New Story
         </Button>
-        <Button
-          variant="glass"
-          size="icon"
-          onClick={() => setPanelOpen(!panelOpen)}
-          className="pointer-events-auto"
-        >
-          {panelOpen ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
-        </Button>
+        <div className="flex items-center gap-2 pointer-events-auto">
+          <Button variant="glass" size="sm" onClick={shareLink}>
+            {copied ? <Check className="w-4 h-4 mr-1.5" /> : <Share2 className="w-4 h-4 mr-1.5" />}
+            {copied ? "Copied!" : "Share"}
+          </Button>
+          <Button
+            variant="glass"
+            size="icon"
+            onClick={() => setPanelOpen(!panelOpen)}
+          >
+            {panelOpen ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
+          </Button>
+        </div>
       </div>
 
       {/* Side panel */}
@@ -134,7 +115,7 @@ const Experience = () => {
             <div>
               <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Narration</h3>
               <p className="text-sm text-secondary-foreground leading-relaxed whitespace-pre-line">
-                {pipelineData.scenes.map((s, i) => (
+                {scenes.map((s, i) => (
                   <span key={s.id} className={i === activeSceneIndex ? "text-primary font-medium" : "text-muted-foreground"}>
                     {s.narration_text}{" "}
                   </span>
@@ -144,10 +125,10 @@ const Experience = () => {
             <div>
               <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Scenes</h3>
               <div className="space-y-1">
-                {pipelineData.scenes.map((s, i) => (
+                {scenes.map((s, i) => (
                   <button
                     key={s.id}
-                    onClick={() => jumpToScene(s)}
+                    onClick={() => setActiveSceneIndex(i)}
                     className={`w-full text-left rounded-md px-3 py-2 text-sm transition-colors ${
                       i === activeSceneIndex
                         ? "bg-primary/15 text-primary"
@@ -163,65 +144,35 @@ const Experience = () => {
         </div>
       )}
 
-      {/* Bottom overlay */}
+      {/* Bottom bar — scene nav */}
       <div className="absolute bottom-0 left-0 right-0 z-20 glass">
         <div className="px-5 py-3 flex items-center gap-4">
-          {/* Play/pause */}
-          <Button variant="ghost" size="icon" onClick={togglePlay} className="shrink-0">
-            {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+          {/* Scene nav */}
+          <Button variant="ghost" size="icon" onClick={prevScene} disabled={activeSceneIndex === 0} className="shrink-0">
+            <ChevronLeft className="w-5 h-5" />
           </Button>
 
-          {/* Time */}
-          <span className="text-xs text-muted-foreground font-mono w-10 text-right shrink-0">
-            {formatTime(currentTime)}
-          </span>
-
-          {/* Scrubber */}
-          <div className="flex-1 relative h-8 flex items-center group cursor-pointer"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              const frac = (e.clientX - rect.left) / rect.width;
-              seekTo(frac);
-            }}
-          >
-            <div className="w-full h-1 rounded-full bg-muted relative">
-              <div
-                className="absolute inset-y-0 left-0 rounded-full bg-primary transition-all duration-100"
-                style={{ width: duration ? `${(currentTime / duration) * 100}%` : "0%" }}
-              />
-              {/* Scene markers */}
-              {pipelineData.scenes.map((s, i) => (
-                <div
-                  key={s.id}
-                  className={`absolute top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full transition-colors ${
-                    i === activeSceneIndex ? "bg-primary" : "bg-muted-foreground/40"
-                  }`}
-                  style={{ left: `${s.time_start * 100}%` }}
-                />
-              ))}
-            </div>
-          </div>
-
-          <span className="text-xs text-muted-foreground font-mono w-10 shrink-0">
-            {formatTime(duration)}
-          </span>
-
-          {/* Scene indicator */}
-          <div className="hidden md:flex items-center gap-2 ml-2 shrink-0">
-            <div className="flex gap-1">
-              {pipelineData.scenes.map((_, i) => (
-                <div
+          {/* Scene dots + title */}
+          <div className="flex-1 flex items-center justify-center gap-3">
+            <div className="flex gap-1.5">
+              {scenes.map((_, i) => (
+                <button
                   key={i}
-                  className={`w-2 h-2 rounded-full transition-colors ${
-                    i === activeSceneIndex ? "bg-primary" : "bg-muted-foreground/30"
+                  onClick={() => setActiveSceneIndex(i)}
+                  className={`w-2.5 h-2.5 rounded-full transition-colors ${
+                    i === activeSceneIndex ? "bg-primary" : "bg-muted-foreground/30 hover:bg-muted-foreground/50"
                   }`}
                 />
               ))}
             </div>
-            <span className="text-xs text-muted-foreground truncate max-w-[120px]">
+            <span className="text-sm text-muted-foreground truncate max-w-[200px]">
               {activeScene?.title}
             </span>
           </div>
+
+          <Button variant="ghost" size="icon" onClick={nextScene} disabled={activeSceneIndex === scenes.length - 1} className="shrink-0">
+            <ChevronRight className="w-5 h-5" />
+          </Button>
 
           {/* Gemini voice chat */}
           <div className="ml-2 shrink-0">

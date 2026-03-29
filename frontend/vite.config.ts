@@ -15,6 +15,12 @@ export default defineConfig(({ mode }) => ({
     headers: {
       "Accept-Encoding": "gzip",
     },
+    proxy: {
+      "/api": {
+        target: "http://localhost:8002",
+        rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+    },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {

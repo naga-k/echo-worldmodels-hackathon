@@ -7,6 +7,7 @@ import { PipelineProvider } from "@/context/PipelineContext";
 import Index from "./pages/Index.tsx";
 import Processing from "./pages/Processing.tsx";
 import Experience from "./pages/Experience.tsx";
+import Gallery from "./pages/Gallery.tsx";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -20,8 +21,12 @@ const App = () => (
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Index />} />
-            <Route path="/processing" element={<Processing />} />
-            <Route path="/experience" element={<Experience />} />
+            <Route path="/processing/:id" element={<Processing />} />
+            <Route path="/experience/:id" element={<Experience />} />
+            <Route path="/gallery" element={<Gallery />} />
+            {/* Legacy routes redirect */}
+            <Route path="/processing" element={<Index />} />
+            <Route path="/experience" element={<Index />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
