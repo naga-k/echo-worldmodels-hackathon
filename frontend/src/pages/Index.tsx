@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePipeline } from "@/context/PipelineContext";
 import { sampleStories } from "@/lib/samples";
+import { fetchSamples, type SampleStory } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { BookOpen } from "lucide-react";
 
@@ -9,6 +10,13 @@ const Index = () => {
   const navigate = useNavigate();
   const { setInputText } = usePipeline();
   const [text, setText] = useState("");
+  const [samples, setSamples] = useState<SampleStory[]>([]);
+
+  useEffect(() => {
+    fetchSamples()
+      .then(setSamples)
+      .catch(() => setSamples([]));
+  }, []);
 
   const handleSubmit = () => {
     if (!text.trim()) return;
@@ -54,8 +62,8 @@ const Index = () => {
           <p className="text-muted-foreground text-xs uppercase tracking-widest mb-4 text-center">
             Or try a classic
           </p>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {sampleStories.map((story) => (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {(samples.length > 0 ? samples : sampleStories).map((story) => (
               <button
                 key={story.title}
                 onClick={() => setText(story.text)}

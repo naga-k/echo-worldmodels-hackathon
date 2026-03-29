@@ -481,6 +481,19 @@ async def poll_worlds(operation_ids: str):
     return result
 
 
+# ─── GET /samples ───
+
+SAMPLES_PATH = Path(os.path.dirname(__file__)) / "db" / "samples.json"
+
+
+@app.get("/samples", tags=["System"], summary="Get sample stories",
+         description="Returns sample stories for the 'Or try a classic' UI.")
+async def get_samples():
+    if not SAMPLES_PATH.exists():
+        return []
+    return json.loads(SAMPLES_PATH.read_text())
+
+
 # ─── System ───
 
 @app.get("/health", tags=["System"], summary="Health check",

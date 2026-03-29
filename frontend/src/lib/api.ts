@@ -38,3 +38,17 @@ export async function pollWorlds(operationIds: string[]): Promise<PollWorldsResp
   if (!res.ok) throw new Error("Failed to poll worlds");
   return res.json();
 }
+
+export interface SampleStory {
+  id: string;
+  title: string;
+  author: string;
+  description: string;
+  text: string;
+}
+
+export async function fetchSamples(): Promise<SampleStory[]> {
+  const res = await fetch(`${API_URL}/samples`);
+  if (!res.ok) return [];
+  return res.json();
+}
