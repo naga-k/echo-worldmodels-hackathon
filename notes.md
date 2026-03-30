@@ -11,3 +11,7 @@ P2. When we either trigger cached inputs or show prev runs, play show the proces
 
 P3. Admin screen where i can change the worldabs model etc.
     P4. later move it under auth 
+
+P1. Local database setup needs to be improved
+
+P1. Keep a daily total limit of all user generation. maybe bypass with a code? link to set up on their own.
