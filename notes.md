@@ -1,17 +1,21 @@
-P1. When askign gemini live quesionts, hit the mic button it should pause the narration.
+# Echo — TODO Notes
 
-P2. bgm
+## P1 — High Priority
 
-P1. wire in the collision mesh
+- [ ] Improve local database setup
+- [ ] Add daily total limit on user generations (bypass with a code? link to set up on their own)
 
-P2. When first world is genearted make it viewable
+## P2 — Medium Priority
 
-P2. When we either trigger cached inputs or show prev runs, play show the processing screen the scenes etc. 
-    P3. Also include the test descriptions and supporting data (like a sidebar)
+- [ ] Make first world viewable as soon as it's generated (don't wait for all)
+- [ ] Show processing screen with scenes for cached inputs / previous runs
+  - P3: Include scene descriptions and supporting data in a sidebar
 
-P3. Admin screen where i can change the worldabs model etc.
-    P4. later move it under auth 
+## P3 — Low Priority
 
-P1. Local database setup needs to be improved
+- [ ] Admin screen to change World Labs model, etc.
+  - P4: Later move admin under auth
 
-P1. Keep a daily total limit of all user generation. maybe bypass with a code? link to set up on their own.
+## Bugs / Cleanup
+
+- [ ] Gallery has duplicates and failed generations — remove them

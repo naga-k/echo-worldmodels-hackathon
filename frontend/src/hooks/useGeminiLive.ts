@@ -189,12 +189,21 @@ export function useGeminiLive({
       // Start microphone capture and stream PCM to backend.
       // Gemini Live handles turn-taking server-side. Mic can be muted
       // via toggleMic() without disconnecting the session.
-      const stopMic = await createMicrophoneStream((pcm) => {
-        if (ws.readyState === WebSocket.OPEN && !micMutedRef.current && !heldRef.current) {
-          ws.send(pcm);
-        }
-      });
-      stopMicRef.current = stopMic;
+      // NOTE: getUserMedia requires a secure context (HTTPS or localhost).
+      // On HTTP + LAN IP, mic will fail — session continues without mic (one-way audio).
+      try {
+        const stopMic = await createMicrophoneStream((pcm) => {
+          if (ws.readyState === WebSocket.OPEN && !micMutedRef.current && !heldRef.current) {
+            ws.send(pcm);
+          }
+        });
+        stopMicRef.current = stopMic;
+      } catch (micErr) {
+        console.warn("[gemini-live] Mic unavailable (secure context required for getUserMedia):", micErr);
+        // Session continues — user hears the guide but can't talk back
+        micMutedRef.current = true;
+        setMicMuted(true);
+      }
 
       // Capture canvas frame at 1 FPS and send to backend for Gemini to see
       frameIntervalRef.current = setInterval(() => {
