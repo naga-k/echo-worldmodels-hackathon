@@ -9,19 +9,19 @@ from typing import Optional
 
 import base64
 
+# Load env BEFORE importing db (db reads ECHO_DATA_DIR at import time)
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
 from db import init_db, create_generation, get_generation, update_generation, list_generations as db_list_generations, AUDIO_DIR
 
 import httpx
 from google import genai
 from google.genai import types as genai_types
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
-
-# Load env from parent directory's .env
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 # ─── File-based cache ───
 # Caches API responses to disk so repeated calls during dev are instant.
@@ -318,7 +318,7 @@ async def generate_speech(req: SpeechRequest):
 
 # ─── BGM generation via Lyria 3 Clip ───
 
-BGM_DIR = Path(os.path.dirname(__file__)) / "db" / "audio"
+BGM_DIR = AUDIO_DIR
 
 
 async def generate_bgm(generation_id: str, scene_id: str, music_description: str) -> Optional[str]:
@@ -972,5 +972,8 @@ async def gemini_live_ws(websocket: WebSocket):
 
 
 if __name__ == "__main__":
+    import sys
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True)
+    reload = "--no-reload" not in sys.argv
+    port = int(os.environ.get("PORT", 8002))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload)

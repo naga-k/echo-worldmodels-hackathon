@@ -2,7 +2,13 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import type { Scene } from "@/types/pipeline";
 import { createMicrophoneStream, createPCMPlayer, pcm16ToFloat32 } from "@/lib/audio";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8002";
+function getApiBase() {
+  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
+  const host = window.location.hostname;
+  if (host === "localhost" || host === "127.0.0.1") return "http://localhost:8002";
+  return `${window.location.protocol}//${host}:8002`;
+}
+const API_BASE = getApiBase();
 const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 export type GeminiLiveStatus = "disconnected" | "connecting" | "connected" | "error";

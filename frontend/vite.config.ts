@@ -12,9 +12,6 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
-    headers: {
-      "Accept-Encoding": "gzip",
-    },
     proxy: {
       "/api": {
         target: "http://localhost:8002",

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-DB_DIR = Path(os.path.dirname(__file__)) / "db"
+DB_DIR = Path(os.path.expanduser(os.environ.get("ECHO_DATA_DIR", "~/.echo-data")))
 DB_PATH = DB_DIR / "echo.db"
 AUDIO_DIR = DB_DIR / "audio"
 

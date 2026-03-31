@@ -31,6 +31,7 @@ const Processing = () => {
   const [generation, setGeneration] = useState<Generation | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isFirstPoll = useRef(true);
 
   const steps: Step[] = (() => {
     const activeStep = generation ? STATUS_TO_STEP[generation.status] ?? -1 : -1;
@@ -85,7 +86,10 @@ const Processing = () => {
 
         if (gen.status === "completed") {
           if (pollRef.current) clearInterval(pollRef.current);
-          setTimeout(() => navigate(`/experience/${id}`), 800);
+          // If already completed on first poll (cached), show the animation longer
+          const delay = isFirstPoll.current ? 4000 : 800;
+          isFirstPoll.current = false;
+          setTimeout(() => navigate(`/experience/${id}`), delay);
         } else if (gen.status === "failed") {
           if (pollRef.current) clearInterval(pollRef.current);
           setError(gen.error || "Generation failed");

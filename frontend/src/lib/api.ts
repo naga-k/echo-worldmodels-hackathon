@@ -1,6 +1,14 @@
 import type { ExtractScenesResponse, GenerateWorldsResponse, PollWorldsResponse, Generation, GenerationSummary } from "@/types/pipeline";
 
-const API_URL = import.meta.env.VITE_API_URL || "/api";
+// On localhost, use Vite proxy. On any other host (tunnel, LAN), hit the backend directly.
+function getApiUrl() {
+  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
+  const host = window.location.hostname;
+  if (host === "localhost" || host === "127.0.0.1") return "/api";
+  // Non-localhost: assume backend is on the same host, port 8002
+  return `${window.location.protocol}//${host}:8002`;
+}
+const API_URL = getApiUrl();
 
 export async function extractScenes(text: string): Promise<ExtractScenesResponse> {
   const res = await fetch(`${API_URL}/extract-scenes`, {
