@@ -6,22 +6,23 @@ Paste a story, step inside it. Text gets decomposed into scenes, each scene beco
 
 ```
 worldlabs/
-├── backend/          Python FastAPI server (port 8002)
+├── backend/          Python FastAPI server (port 8002 dev, 8003 serve)
 │   ├── main.py       All API endpoints + background pipeline
-│   ├── db.py         SQLite persistence layer
-│   ├── db/           Data directory (echo.db, samples, book texts, BGM audio)
+│   ├── db.py         SQLite persistence layer (data in ECHO_DATA_DIR)
+│   ├── db/           Static data (samples.json, book texts) — NOT runtime data
 │   ├── test_api.py   End-to-end test script
 │   └── requirements.txt
-├── frontend/         React/SparkJS viewer (port 8080)
+├── frontend/         React/SparkJS viewer (port 8080 dev, Vercel prod)
 │   ├── src/pages/    Index, Processing, Experience, Gallery
 │   ├── src/hooks/    useGeminiLive (voice chat), useAudioMixer (BGM + ducking)
-│   └── vite.config.ts  Proxy /api → localhost:8002
-├── .Codex/skills/   Project-specific skills (grab-story)
-├── run.sh            Starts backend + frontend + optional Cloudflare tunnel
-└── .env              API keys (not committed)
+│   ├── vite.config.ts  Proxy /api → localhost:8002 (dev only)
+│   └── vercel.json   Vercel deployment config
+├── .agents/skills/   Project-specific skills (grab-story)
+├── run.sh            Starts backend + frontend / serve mode with tunnel
+└── .env              API keys + ECHO_DATA_DIR (not committed)
 ```
 
-Backend and frontend are fully separated. Backend exposes REST JSON API, frontend consumes it via Vite proxy (`/api` → `localhost:8002`).
+Backend and frontend are fully separated. Backend exposes REST JSON API. In dev, frontend proxies `/api` → `localhost:8002`. In production, frontend talks directly to backend via `VITE_API_URL`.
 
 ## Backend API Endpoints
 
@@ -41,13 +42,18 @@ Backend and frontend are fully separated. Backend exposes REST JSON API, fronten
 ## Running
 
 ```bash
-# Everything at once (recommended)
-./run.sh
+./run.sh              # Dev: backend (8002, reload) + frontend (8080)
+./run.sh --serve      # Server: backend (8003, no reload) + Cloudflare tunnel
+./run.sh --backend-only  # Backend only (8002, reload)
 
 # Or manually:
 cd backend && source .venv/bin/activate && python main.py  # port 8002
 cd frontend && npm run dev                                  # port 8080
 ```
+
+### Remote development (VS Code tunnel / LAN)
+
+Both backend and frontend bind to `0.0.0.0`, so they're accessible on the local network. From another device on the same network, open `http://<machine-ip>:8080`. The frontend auto-detects non-localhost access and hits the backend at `<same-host>:8002` directly (no Vite proxy). No tunnel configuration needed for LAN access.
 
 ## Frontend Routes
 
@@ -60,9 +66,15 @@ cd frontend && npm run dev                                  # port 8080
 
 ## Env Vars (root .env)
 
+- `ECHO_DATA_DIR` — Runtime data directory (default: `~/.echo-data/`). SQLite DB + audio files.
 - `GEMINI_API_KEY` — Google Gemini (scene extraction, BGM generation via Lyria 3, voice chat)
 - `ELEVEN_LABS_API` — ElevenLabs TTS (currently unused, narration removed)
 - `WORLD_LABS_API_KEY` — World Labs Marble API (3D world generation)
+
+## Deployment
+
+- **Backend**: Local machine, exposed via named Cloudflare Tunnel. `./run.sh --serve` starts backend on :8003 + tunnel.
+- **Frontend**: Vercel. `cd frontend && vercel --prod`. Set `VITE_API_URL` env var in Vercel to the tunnel URL.
 
 ## Key Technical Details
 
@@ -118,8 +130,9 @@ Text → POST /generations → backend runs full pipeline as background task:
 
 - Backend is Python (FastAPI + httpx + google-genai), SQLite for persistence
 - Frontend is React + THREE.js + SparkJS (@sparkjsdev/spark) for Gaussian splat rendering
-- Frontend uses Vite proxy (`/api/*` → `localhost:8002`) — only one port needs tunneling
+- Frontend uses Vite proxy (`/api/*` → `localhost:8002`) on localhost; auto-detects LAN/tunnel and hits backend directly on port 8002
 - All API keys loaded from root `.env` via python-dotenv
 - Never commit `.env` or API keys
 - Use `Marble 0.1-mini` for testing (not plus) — cheaper
-- Cloudflare tunnel (via `cloudflared`) for sharing with friends — auto-started by `run.sh`
+- Named Cloudflare Tunnel for stable backend URL
+- Frontend deployed on Vercel, talks to backend via `VITE_API_URL`
