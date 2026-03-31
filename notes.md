@@ -15,7 +15,3 @@
 
 - [ ] Admin screen to change World Labs model, etc.
   - P4: Later move admin under auth
-
-## Bugs / Cleanup
-
-- [ ] Gallery has duplicates and failed generations — remove them
