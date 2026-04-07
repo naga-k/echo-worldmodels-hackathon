@@ -168,6 +168,7 @@ const Experience = () => {
           <SceneViewer
             spzUrl={activeScene.spz_url}
             colliderMeshUrl={activeScene.collider_mesh_url}
+            semantics={activeScene.semantics}
             showDebug={false}
             onCanvasReady={(canvas) => { canvasRef.current = canvas; }}
           />

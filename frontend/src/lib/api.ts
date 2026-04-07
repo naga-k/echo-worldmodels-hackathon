@@ -1,4 +1,15 @@
-import type { ExtractScenesResponse, GenerateWorldsResponse, PollWorldsResponse, Generation, GenerationSummary } from "@/types/pipeline";
+import type {
+  DiagnosticRecord,
+  ExtractScenesResponse,
+  GenerateWorldsResponse,
+  PollWorldsResponse,
+  Generation,
+  GenerationSummary,
+  MarbleModel,
+  SpzTier,
+  ViewerMode,
+  DiagnosticClassification,
+} from "@/types/pipeline";
 
 // On localhost, use Vite proxy. On any other host (tunnel, LAN), hit the backend directly.
 function getApiUrl() {
@@ -31,18 +42,26 @@ export async function generateSpeech(text: string): Promise<string> {
   return URL.createObjectURL(blob);
 }
 
-export async function generateWorlds(scenes: { id: string; marble_prompt: string }[], model: string = "Marble 0.1-mini"): Promise<GenerateWorldsResponse> {
+export async function generateWorlds(
+  scenes: { id: string; marble_prompt: string }[],
+  model: MarbleModel = "Marble 0.1-mini",
+  assetTier: SpzTier = "full_res",
+): Promise<GenerateWorldsResponse> {
   const res = await fetch(`${API_URL}/generate-worlds`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scenes, model }),
+    body: JSON.stringify({ scenes, model, asset_tier: assetTier }),
   });
   if (!res.ok) throw new Error("Failed to generate worlds");
   return res.json();
 }
 
-export async function pollWorlds(operationIds: string[]): Promise<PollWorldsResponse> {
-  const res = await fetch(`${API_URL}/poll-worlds?operation_ids=${operationIds.join(",")}`);
+export async function pollWorlds(operationIds: string[], assetTier: SpzTier = "full_res"): Promise<PollWorldsResponse> {
+  const params = new URLSearchParams({
+    operation_ids: operationIds.join(","),
+    asset_tier: assetTier,
+  });
+  const res = await fetch(`${API_URL}/poll-worlds?${params.toString()}`);
   if (!res.ok) throw new Error("Failed to poll worlds");
   return res.json();
 }
@@ -63,11 +82,18 @@ export async function fetchSamples(): Promise<SampleStory[]> {
 
 // ─── Generation API ───
 
-export async function createGeneration(text: string): Promise<{ id: string }> {
+export async function createGeneration(
+  text: string,
+  options?: { model?: MarbleModel; assetTier?: SpzTier },
+): Promise<{ id: string }> {
   const res = await fetch(`${API_URL}/generations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({
+      text,
+      model: options?.model,
+      asset_tier: options?.assetTier,
+    }),
   });
   if (!res.ok) throw new Error("Failed to create generation");
   return res.json();
@@ -82,6 +108,39 @@ export async function getGeneration(id: string): Promise<Generation> {
 export async function listGenerations(): Promise<GenerationSummary[]> {
   const res = await fetch(`${API_URL}/generations`);
   if (!res.ok) return [];
+  return res.json();
+}
+
+export async function listDiagnosticGenerations(limit: number = 25): Promise<GenerationSummary[]> {
+  const res = await fetch(`${API_URL}/diagnostics/generations?limit=${limit}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function getDiagnosticGeneration(id: string): Promise<Generation> {
+  const res = await fetch(`${API_URL}/diagnostics/generations/${id}`);
+  if (!res.ok) throw new Error("Diagnostics generation not found");
+  return res.json();
+}
+
+export async function updateSceneDiagnostics(
+  generationId: string,
+  sceneId: string,
+  payload: {
+    classification?: DiagnosticClassification | null;
+    viewer_mode?: ViewerMode;
+    asset_tier?: SpzTier;
+    echo_screenshot_url?: string | null;
+    reference_screenshot_url?: string | null;
+    notes?: string | null;
+  },
+): Promise<DiagnosticRecord> {
+  const res = await fetch(`${API_URL}/diagnostics/generations/${generationId}/scenes/${sceneId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error("Failed to update scene diagnostics");
   return res.json();
 }
 

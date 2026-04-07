@@ -8,6 +8,7 @@ import Index from "./pages/Index.tsx";
 import Processing from "./pages/Processing.tsx";
 import Experience from "./pages/Experience.tsx";
 import Gallery from "./pages/Gallery.tsx";
+import Diagnostics from "./pages/Diagnostics.tsx";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -24,6 +25,7 @@ const App = () => (
             <Route path="/processing/:id" element={<Processing />} />
             <Route path="/experience/:id" element={<Experience />} />
             <Route path="/gallery" element={<Gallery />} />
+            <Route path="/diagnostics" element={<Diagnostics />} />
             {/* Legacy routes redirect */}
             <Route path="/processing" element={<Index />} />
             <Route path="/experience" element={<Index />} />
