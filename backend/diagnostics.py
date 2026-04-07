@@ -17,6 +17,29 @@ SHOT_TERMS = (
     "zoomed in",
 )
 
+REAR_CONTEXT_TERMS = (
+    "behind",
+    "back wall",
+    "rear",
+    "opposite wall",
+    "opposite side",
+    "behind the viewer",
+    "behind the telescope",
+)
+
+OUTDOOR_CONTEXT_TERMS = (
+    "sky",
+    "horizon",
+    "cliff",
+    "shore",
+    "field",
+    "forest",
+    "moor",
+    "street",
+    "alley",
+    "courtyard",
+)
+
 LAYOUT_TERMS = (
     "left",
     "right",
@@ -87,6 +110,15 @@ PROP_TERMS = (
     "statue",
 )
 
+REWRITE_REQUIRED_WARNINGS = {
+    "shot-like framing",
+    "object vignette",
+    "weak topology",
+    "missing enclosure",
+    "missing rear context",
+    "prop-heavy layout",
+}
+
 
 def normalize_spz_urls(spz_urls: Any) -> dict[str, str]:
     if not isinstance(spz_urls, dict):
@@ -150,9 +182,12 @@ def analyze_prompt(
     layout_hits = _term_hits(normalized, LAYOUT_TERMS)
     boundary_hits = _term_hits(normalized, BOUNDARY_TERMS)
     prop_hits = _term_hits(normalized, PROP_TERMS)
+    rear_hits = _term_hits(normalized, REAR_CONTEXT_TERMS)
     shot_like = any(term in normalized for term in SHOT_TERMS)
     weak_topology = layout_hits < 2
     missing_enclosure = boundary_hits == 0
+    has_outdoor_context = any(term in normalized for term in OUTDOOR_CONTEXT_TERMS)
+    missing_rear_context = rear_hits == 0 and not has_outdoor_context
     object_vignette = shot_like or ("doorway" in normalized and boundary_hits < 2)
     prop_heavy = comma_count >= 4 and layout_hits < 2
 
@@ -165,6 +200,8 @@ def analyze_prompt(
         warnings.append("weak topology")
     if missing_enclosure:
         warnings.append("missing enclosure")
+    if missing_rear_context:
+        warnings.append("missing rear context")
     if prop_heavy:
         warnings.append("prop-heavy layout")
 
@@ -181,6 +218,7 @@ def analyze_prompt(
             "comma_count": comma_count,
             "layout_hits": layout_hits,
             "boundary_hits": boundary_hits,
+            "rear_hits": rear_hits,
             "prop_hits": prop_hits,
             "recaption_ratio": recaption_ratio,
         },
@@ -190,3 +228,8 @@ def analyze_prompt(
             "world_prompt_text": world_prompt_text,
         },
     }
+
+
+def prompt_requires_rewrite(analysis: dict[str, Any]) -> bool:
+    warnings = set(analysis.get("warnings") or [])
+    return bool(warnings & REWRITE_REQUIRED_WARNINGS)

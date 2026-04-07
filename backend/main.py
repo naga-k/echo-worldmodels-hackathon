@@ -24,7 +24,7 @@ from db import (
     upsert_scene_diagnostic,
     AUDIO_DIR,
 )
-from diagnostics import analyze_prompt, normalize_spz_urls, select_spz_url, source_excerpt
+from diagnostics import analyze_prompt, normalize_spz_urls, prompt_requires_rewrite, select_spz_url, source_excerpt
 
 import httpx
 from google import genai
@@ -161,11 +161,18 @@ def _augment_generation_for_diagnostics(generation: dict) -> dict:
     for scene in generation.get("scenes", []):
         diagnostic_record = diagnostics.get(scene["id"])
         world_prompt_text = scene.get("world_prompt_text")
-        prompt_analysis = analyze_prompt(
+        prompt_analysis_after = scene.get("prompt_analysis_after")
+        prompt_analysis = prompt_analysis_after or analyze_prompt(
             scene.get("marble_prompt"),
             caption=scene.get("caption"),
             world_prompt_text=world_prompt_text,
         )
+        if scene.get("prompt_analysis_before") and scene["prompt_analysis_before"].get("comparisons"):
+            scene["prompt_analysis_before"]["comparisons"]["caption"] = scene.get("caption")
+            scene["prompt_analysis_before"]["comparisons"]["world_prompt_text"] = world_prompt_text
+        if prompt_analysis.get("comparisons"):
+            prompt_analysis["comparisons"]["caption"] = scene.get("caption")
+            prompt_analysis["comparisons"]["world_prompt_text"] = world_prompt_text
         if diagnostic_record and diagnostic_record.get("classification"):
             key = diagnostic_record["classification"]
             classification_counts[key] = classification_counts.get(key, 0) + 1
@@ -218,6 +225,7 @@ ELEVEN_LABS_API = os.getenv("ELEVEN_LABS_API", "")
 WORLD_LABS_API_KEY = os.getenv("WORLD_LABS_API_KEY", "")
 DEFAULT_MARBLE_MODEL = os.getenv("DEFAULT_MARBLE_MODEL", "Marble 0.1-mini")
 DEFAULT_SPZ_TIER = os.getenv("DEFAULT_SPZ_TIER", "full_res")
+EXTRACTION_CACHE_VERSION = "v3"
 
 MARBLE_BASE = "https://api.worldlabs.ai/marble/v1"
 ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
@@ -302,6 +310,140 @@ class DiagnosticUpdateRequest(BaseModel):
     notes: Optional[str] = None
 
 
+COMPAT_CAMERA_DIRECTIONS = {"forward", "left", "right", "up", "orbit"}
+
+
+def _extract_cache_key(text: str) -> str:
+    return _cache_key("extract", EXTRACTION_CACHE_VERSION, text)
+
+
+def _guide_context_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _scene_prompt_fields(scene: dict) -> dict:
+    return {
+        "id": scene.get("id"),
+        "title": scene.get("title"),
+        "source_ref": scene.get("source_ref"),
+        "narration_text": scene.get("narration_text"),
+        "marble_prompt": scene.get("marble_prompt"),
+        "camera_direction": scene.get("camera_direction"),
+        "mood": scene.get("mood"),
+    }
+
+
+def _coerce_camera_direction(candidate: Optional[str], fallback: str) -> str:
+    if isinstance(candidate, str) and candidate in COMPAT_CAMERA_DIRECTIONS:
+        return candidate
+    return fallback
+
+
+SPATIAL_REWRITE_PROMPT = """You are refining scene prompts for navigable 3D world generation in Echo.
+
+You will receive:
+- the full source text for context
+- one extracted scene object
+- prompt-analysis warnings for the current marble_prompt
+
+Your job:
+- rewrite only the scene's marble_prompt into a stronger explorable-space prompt
+- preserve the same story beat, setting, era, tone, and scene identity
+- keep the same scene count and scene boundaries
+- use moderate inference to fill in missing spatial structure when the text is sparse
+
+Requirements for the rewritten marble_prompt:
+- describe one coherent navigable space, not a close-up or shot
+- include enclosing geometry or outdoor horizon context
+- include viewer-relative topology such as left, right, center, behind, opposite, or along
+- include major surfaces and boundaries: floor, walls, ceiling/sky, openings
+- place anchor objects in the space rather than listing props without positions
+- stay concrete and physical
+
+Do not:
+- invent new narrative events, characters, or props that change the story beat
+- use shot language like close-up, portrait, macro, detail shot
+- write abstract literary prose
+
+camera_direction is compatibility-only metadata. Keep it unless the spatial rewrite clearly implies a better value.
+
+Return ONLY JSON:
+{
+  "marble_prompt": "...",
+  "camera_direction": "forward",
+  "rewrite_notes": "one short sentence"
+}
+"""
+
+
+async def _rewrite_scene_prompt(scene: dict, full_text: str, retry_reason: Optional[str] = None) -> dict:
+    if not gemini_client:
+        return {}
+
+    current_analysis = analyze_prompt(scene.get("marble_prompt"))
+    retry_block = f"\nRewrite failed because: {retry_reason}\n" if retry_reason else ""
+    response = await asyncio.to_thread(
+        gemini_client.models.generate_content,
+        model="gemini-3-flash-preview",
+        contents=(
+            f"{SPATIAL_REWRITE_PROMPT}\n\n"
+            f"Full source text:\n{full_text}\n\n"
+            f"Scene JSON:\n{json.dumps(_scene_prompt_fields(scene), ensure_ascii=False)}\n\n"
+            f"Current prompt warnings: {', '.join(current_analysis['warnings']) or 'none'}"
+            f"{retry_block}"
+        ),
+        config={"response_mime_type": "application/json"},
+    )
+    raw = response.text.strip()
+    data = json.loads(raw)
+    if not isinstance(data, dict) or not isinstance(data.get("marble_prompt"), str):
+        raise ValueError("Invalid prompt rewrite response")
+    return data
+
+
+async def _refine_scene_prompts(full_text: str, scenes: list[dict]) -> list[dict]:
+    refined: list[dict] = []
+
+    for scene in scenes:
+        updated = dict(scene)
+        original_prompt = updated.get("marble_prompt", "")
+        updated["original_marble_prompt"] = original_prompt
+        before_analysis = analyze_prompt(original_prompt)
+        updated["prompt_analysis_before"] = before_analysis
+        updated["rewrite_applied"] = False
+        updated["rewrite_retry_count"] = 0
+        updated["rewrite_error"] = None
+
+        final_analysis = before_analysis
+        if prompt_requires_rewrite(before_analysis):
+            try:
+                retry_reason = None
+                for attempt in range(2):
+                    rewrite = await _rewrite_scene_prompt(updated, full_text, retry_reason=retry_reason)
+                    candidate_prompt = " ".join((rewrite.get("marble_prompt") or "").split())
+                    if candidate_prompt:
+                        updated["marble_prompt"] = candidate_prompt
+                    updated["camera_direction"] = _coerce_camera_direction(
+                        rewrite.get("camera_direction"),
+                        updated.get("camera_direction", "forward"),
+                    )
+                    final_analysis = analyze_prompt(updated.get("marble_prompt"))
+                    updated["rewrite_applied"] = updated.get("marble_prompt") != original_prompt
+                    updated["rewrite_retry_count"] = attempt
+                    if not prompt_requires_rewrite(final_analysis):
+                        break
+                    retry_reason = ", ".join(final_analysis["warnings"]) or "prompt is still not spatial enough"
+            except Exception as exc:
+                updated["rewrite_error"] = str(exc)
+                updated["marble_prompt"] = original_prompt
+                final_analysis = before_analysis
+
+        updated["prompt_analysis_after"] = final_analysis
+        refined.append(updated)
+
+    return refined
+
+
 # ─── POST /extract-scenes ───
 
 EXTRACTION_PROMPT = """You are a story-to-3D-world decomposer for the "Echo" experience platform. Given input text (a story, transcript, or description), identify 2-5 distinct physical scenes/locations mentioned or implied.
@@ -311,16 +453,16 @@ For each scene, produce:
 - title: Short descriptive name (3-5 words)
 - source_ref: If the input text contains chapter numbers, page numbers, section headers, act/scene labels, episode numbers, or any structural markers, include them here (e.g., "Chapter 3", "Page 42", "Act II Scene 1", "Episode 4 - 12:30"). If no structural markers exist, set to null.
 - marble_prompt: A prompt optimized for 3D world generation with World Labs Marble API. Be CONCRETE and PHYSICAL. Describe: the space layout, key objects and furniture with positions, materials and textures, colors, lighting conditions (direction, color, intensity), architectural features (walls, floors, ceiling, windows, doors). Do NOT include emotions, abstract concepts, character actions, or narrative. Think "what would a camera see?" Example good prompt: "Dimly lit 1940s private detective office with a heavy oak desk centered in the room, brass desk lamp casting warm light, venetian blinds on a tall window with rain streaks, whiskey bottle and glass on the desk corner, wooden filing cabinets against the wall, worn leather chair, ceiling fan, checkered linoleum floor." Example bad prompt: "A room filled with decades of secrets and the weight of unsolved cases."
-- narration_text: The portion of the original input text that corresponds to this scene. Use the original wording.
+- narration_text: Guide-context text for this scene. Keep it source-grounded and readable for Gemini Live and the side panel. Preserve the original meaning and key wording. Do NOT turn it into an audio performance script.
 - time_start: Fractional start time (0.0 to 1.0) representing when this scene starts in the narration
 - time_end: Fractional end time (0.0 to 1.0) representing when this scene ends in the narration
-- camera_direction: One of "forward", "left", "right", "up", "orbit" - suggests how the camera should move through the scene
+- camera_direction: One of "forward", "left", "right", "up", "orbit". This is compatibility metadata only.
 - mood: A single word describing the mood/atmosphere for color grading (e.g., "noir", "warm", "eerie", "bright", "tense")
 - music_description: A short description of instrumental background music for this scene. Include genre, instruments, mood, tempo. Always end with "Instrumental only, no vocals."
 
 Also produce:
 - title: An overall title for the experience
-- narration_text: The full input text, lightly cleaned up for narration (fix grammar, remove filler words, but keep the voice and content)
+- narration_text: Full guide-context text for Gemini Live and UI reading. Light cleanup for readability is okay, but keep it source-grounded. Do NOT write it like a performed narration script.
 
 Return ONLY valid JSON with this exact structure, no markdown, no explanation:
 {
@@ -358,7 +500,7 @@ async def extract_scenes(req: ExtractRequest):
     if not gemini_client:
         raise HTTPException(500, "GEMINI_API_KEY not configured")
 
-    key = _cache_key(req.text)
+    key = _extract_cache_key(req.text)
     cached = cache_get_json("extract", key)
     if cached:
         return cached
@@ -382,6 +524,9 @@ async def extract_scenes(req: ExtractRequest):
             raise HTTPException(500, "Invalid scene extraction: missing scenes array")
         if len(result["scenes"]) == 0:
             raise HTTPException(500, "No scenes extracted from text")
+
+        result["narration_text"] = _guide_context_text(result.get("narration_text") or req.text)
+        result["scenes"] = await _refine_scene_prompts(req.text, result["scenes"])
 
         cache_set_json("extract", key, result)
         return result
@@ -713,7 +858,7 @@ async def _run_pipeline(gen_id: str, text: str, model: str, asset_tier: str):
         if not gemini_client:
             raise Exception("GEMINI_API_KEY not configured")
 
-        key = _cache_key(text)
+        key = _extract_cache_key(text)
         cached = cache_get_json("extract", key)
         if cached:
             extracted = cached
@@ -727,6 +872,8 @@ async def _run_pipeline(gen_id: str, text: str, model: str, asset_tier: str):
             extracted = json.loads(response.text.strip())
             if "scenes" not in extracted or not extracted["scenes"]:
                 raise Exception("No scenes extracted")
+            extracted["narration_text"] = _guide_context_text(extracted.get("narration_text") or text)
+            extracted["scenes"] = await _refine_scene_prompts(text, extracted["scenes"])
             cache_set_json("extract", key, extracted)
 
         scenes = extracted["scenes"]

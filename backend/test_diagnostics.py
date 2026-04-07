@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from diagnostics import analyze_prompt, select_spz_url
+from diagnostics import analyze_prompt, prompt_requires_rewrite, select_spz_url
 
 
 class DiagnosticsHelpersTest(unittest.TestCase):
@@ -28,6 +28,26 @@ class DiagnosticsHelpersTest(unittest.TestCase):
         )
         self.assertIn("shot-like framing", analysis["warnings"])
         self.assertIn("object vignette", analysis["warnings"])
+        self.assertTrue(prompt_requires_rewrite(analysis))
+
+    def test_prompt_analysis_flags_missing_rear_context(self):
+        analysis = analyze_prompt(
+            "A circular stone room with a brass telescope aimed through a wide opening toward the sea. A desk with maps sits to the right.",
+        )
+        self.assertIn("missing rear context", analysis["warnings"])
+        self.assertTrue(prompt_requires_rewrite(analysis))
+
+    def test_prompt_analysis_accepts_well_formed_room_prompt(self):
+        analysis = analyze_prompt(
+            "A circular stone observatory with pale walls, a dark wood floor, and a domed ceiling. "
+            "A brass telescope stands left of center facing a large sea-facing opening. "
+            "A heavy oak desk with maps and a lantern sits against the right wall, while floor-to-ceiling bookcases line the back wall behind the viewer."
+        )
+        self.assertNotIn("shot-like framing", analysis["warnings"])
+        self.assertNotIn("object vignette", analysis["warnings"])
+        self.assertNotIn("missing enclosure", analysis["warnings"])
+        self.assertNotIn("missing rear context", analysis["warnings"])
+        self.assertFalse(prompt_requires_rewrite(analysis))
 
 
 if __name__ == "__main__":

@@ -365,11 +365,20 @@ const Diagnostics = () => {
               </div>
 
               <div>
-                <div className="text-xs uppercase tracking-widest text-muted-foreground mb-2">Warnings</div>
+                <div className="text-xs uppercase tracking-widest text-muted-foreground mb-2">Final Warnings</div>
                 <div className="flex flex-wrap gap-2">
                   {selectedScene?.prompt_analysis?.warnings.length ? selectedScene.prompt_analysis.warnings.map((warning) => (
                     <Badge key={warning} variant="secondary">{warning}</Badge>
                   )) : <span className="text-sm text-muted-foreground">No warnings detected</span>}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs uppercase tracking-widest text-muted-foreground mb-2">Pre-Rewrite Warnings</div>
+                <div className="flex flex-wrap gap-2">
+                  {selectedScene?.prompt_analysis_before?.warnings.length ? selectedScene.prompt_analysis_before.warnings.map((warning) => (
+                    <Badge key={warning} variant="outline">{warning}</Badge>
+                  )) : <span className="text-sm text-muted-foreground">No rewrite warnings recorded</span>}
                 </div>
               </div>
 
@@ -380,7 +389,15 @@ const Diagnostics = () => {
 
               <div>
                 <div className="text-xs uppercase tracking-widest text-muted-foreground mb-2">Extracted Prompt</div>
+                <p className="text-sm leading-relaxed whitespace-pre-line">{selectedScene?.original_marble_prompt || selectedScene?.marble_prompt || "No prompt available."}</p>
+              </div>
+
+              <div>
+                <div className="text-xs uppercase tracking-widest text-muted-foreground mb-2">Final Prompt</div>
                 <p className="text-sm leading-relaxed whitespace-pre-line">{selectedScene?.marble_prompt || "No prompt available."}</p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Rewrite applied: {selectedScene?.rewrite_applied ? "yes" : "no"} · retries: {selectedScene?.rewrite_retry_count ?? 0}
+                </p>
               </div>
 
               <div>

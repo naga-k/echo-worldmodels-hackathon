@@ -27,6 +27,7 @@ export interface PromptAnalysis {
     comma_count: number;
     layout_hits: number;
     boundary_hits: number;
+    rear_hits: number;
     prop_hits: number;
     recaption_ratio?: number | null;
   };
@@ -48,6 +49,12 @@ export interface Scene {
   camera_direction: string;
   mood: string;
   music_description?: string;
+  original_marble_prompt?: string;
+  rewrite_applied?: boolean;
+  rewrite_retry_count?: number;
+  rewrite_error?: string | null;
+  prompt_analysis_before?: PromptAnalysis;
+  prompt_analysis_after?: PromptAnalysis;
   bgm_path?: string;
   spz_url?: string;
   spz_urls?: Partial<Record<SpzTier, string>>;
