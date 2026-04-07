@@ -5,7 +5,7 @@ import hashlib
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import base64
 
@@ -13,7 +13,18 @@ import base64
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from db import init_db, create_generation, get_generation, update_generation, list_generations as db_list_generations, AUDIO_DIR
+from db import (
+    init_db,
+    create_generation,
+    get_generation,
+    update_generation,
+    list_generations as db_list_generations,
+    list_generation_diagnostics,
+    get_scene_diagnostics,
+    upsert_scene_diagnostic,
+    AUDIO_DIR,
+)
+from diagnostics import analyze_prompt, normalize_spz_urls, select_spz_url, source_excerpt
 
 import httpx
 from google import genai
@@ -72,6 +83,104 @@ def cache_set_bytes(prefix: str, key: str, data: bytes):
     path.write_bytes(data)
 
 
+def _worlds_cache_key(scenes: list[Any], model: str, asset_tier: str) -> str:
+    prompt_parts = []
+    for scene in scenes:
+        if isinstance(scene, dict):
+            prompt_parts.append(scene.get("marble_prompt", ""))
+        else:
+            prompt_parts.append(scene.marble_prompt)
+    return _cache_key("worlds", model, asset_tier, *prompt_parts)
+
+
+def _poll_cache_key(operation_ids: list[str], asset_tier: str) -> str:
+    return _cache_key("poll", asset_tier, *sorted(operation_ids))
+
+
+def _extract_world_id(data: dict) -> Optional[str]:
+    metadata = data.get("metadata") or {}
+    if metadata.get("world_id"):
+        return metadata["world_id"]
+    response = data.get("response") or data.get("result") or {}
+    if isinstance(response, dict):
+        if response.get("world_id"):
+            return response["world_id"]
+        marble_url = response.get("world_marble_url")
+        if isinstance(marble_url, str) and marble_url.rstrip("/"):
+            return marble_url.rstrip("/").split("/")[-1]
+    return None
+
+
+def _world_asset_metadata(world: dict) -> dict:
+    assets = world.get("assets", {}) if isinstance(world, dict) else {}
+    mesh = assets.get("mesh", {}) or {}
+    imagery = assets.get("imagery", {}) or {}
+    splats = assets.get("splats", {}) or {}
+    spz_urls = normalize_spz_urls(splats.get("spz_urls"))
+    world_prompt = world.get("world_prompt") or {}
+    world_prompt_text = world_prompt.get("text_prompt") if isinstance(world_prompt, dict) else None
+    selected_spz_url, selected_spz_tier = select_spz_url(spz_urls, DEFAULT_SPZ_TIER)
+    return {
+        "world_id": world.get("world_id"),
+        "model": world.get("model"),
+        "world_marble_url": world.get("world_marble_url"),
+        "thumbnail_url": assets.get("thumbnail_url"),
+        "pano_url": imagery.get("pano_url"),
+        "caption": assets.get("caption"),
+        "world_prompt_text": world_prompt_text,
+        "spz_urls": spz_urls,
+        "spz_url": selected_spz_url,
+        "selected_spz_tier": selected_spz_tier,
+        "collider_mesh_url": mesh.get("collider_mesh_url"),
+        "semantics": splats.get("semantics_metadata"),
+    }
+
+
+async def _fetch_world_metadata(client: httpx.AsyncClient, world_id: str) -> dict:
+    key = _cache_key(world_id)
+    cached = cache_get_json("worldmeta", key)
+    if cached:
+        return cached
+
+    response = await client.get(
+        f"{MARBLE_BASE}/worlds/{world_id}",
+        headers={"WLT-Api-Key": WORLD_LABS_API_KEY},
+    )
+    if response.status_code != 200:
+        raise HTTPException(response.status_code, f"World metadata error: {response.text}")
+
+    data = response.json()
+    world = data.get("world") or data
+    cache_set_json("worldmeta", key, world)
+    return world
+
+
+def _augment_generation_for_diagnostics(generation: dict) -> dict:
+    diagnostics = get_scene_diagnostics(generation["id"])
+    classification_counts: dict[str, int] = {}
+    for scene in generation.get("scenes", []):
+        diagnostic_record = diagnostics.get(scene["id"])
+        world_prompt_text = scene.get("world_prompt_text")
+        prompt_analysis = analyze_prompt(
+            scene.get("marble_prompt"),
+            caption=scene.get("caption"),
+            world_prompt_text=world_prompt_text,
+        )
+        if diagnostic_record and diagnostic_record.get("classification"):
+            key = diagnostic_record["classification"]
+            classification_counts[key] = classification_counts.get(key, 0) + 1
+        scene["diagnostic_record"] = diagnostic_record
+        scene["prompt_analysis"] = prompt_analysis
+        scene["source_excerpt"] = source_excerpt(scene.get("narration_text") or generation.get("input_text"))
+
+    generation["diagnostics_summary"] = {
+        "scene_count": len(generation.get("scenes", [])),
+        "classified_count": sum(classification_counts.values()),
+        "classification_counts": classification_counts,
+    }
+    return generation
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     missing = []
@@ -107,6 +216,8 @@ app.add_middleware(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ELEVEN_LABS_API = os.getenv("ELEVEN_LABS_API", "")
 WORLD_LABS_API_KEY = os.getenv("WORLD_LABS_API_KEY", "")
+DEFAULT_MARBLE_MODEL = os.getenv("DEFAULT_MARBLE_MODEL", "Marble 0.1-mini")
+DEFAULT_SPZ_TIER = os.getenv("DEFAULT_SPZ_TIER", "full_res")
 
 MARBLE_BASE = "https://api.worldlabs.ai/marble/v1"
 ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
@@ -155,7 +266,8 @@ class ScenePrompt(BaseModel):
 
 class GenerateWorldsRequest(BaseModel):
     scenes: list[ScenePrompt]
-    model: Optional[str] = "Marble 0.1-mini"  # "Marble 0.1-mini" or "Marble 0.1-plus"
+    model: Optional[str] = DEFAULT_MARBLE_MODEL
+    asset_tier: Optional[str] = DEFAULT_SPZ_TIER
 
     model_config = {
         "json_schema_extra": {
@@ -167,11 +279,27 @@ class GenerateWorldsRequest(BaseModel):
                             "marble_prompt": "Dimly lit 1940s private detective office with a heavy oak desk, brass desk lamp, venetian blinds, rain-streaked window, whiskey bottle on the desk corner, wooden filing cabinets, worn leather chair, checkered linoleum floor.",
                         }
                     ],
-                    "model": "Marble 0.1-mini",
+                    "model": DEFAULT_MARBLE_MODEL,
+                    "asset_tier": DEFAULT_SPZ_TIER,
                 }
             ]
         }
     }
+
+
+class CreateGenerationRequest(BaseModel):
+    text: str
+    model: Optional[str] = DEFAULT_MARBLE_MODEL
+    asset_tier: Optional[str] = DEFAULT_SPZ_TIER
+
+
+class DiagnosticUpdateRequest(BaseModel):
+    classification: Optional[str] = None
+    viewer_mode: Optional[str] = None
+    asset_tier: Optional[str] = None
+    echo_screenshot_url: Optional[str] = None
+    reference_screenshot_url: Optional[str] = None
+    notes: Optional[str] = None
 
 
 # ─── POST /extract-scenes ───
@@ -384,7 +512,7 @@ async def generate_bgm(generation_id: str, scene_id: str, music_description: str
 # ─── POST /generate-worlds ───
 
 async def _generate_single_world(
-    client: httpx.AsyncClient, scene_id: str, marble_prompt: str, model: str = "Marble 0.1-mini"
+    client: httpx.AsyncClient, scene_id: str, marble_prompt: str, model: str = DEFAULT_MARBLE_MODEL
 ) -> dict:
     """Fire a single Marble world generation request."""
     response = await client.post(
@@ -415,7 +543,7 @@ async def _generate_single_world(
     if not operation_id:
         return {"scene_id": scene_id, "error": "No operation ID in response"}
 
-    return {"scene_id": scene_id, "operation_id": operation_id}
+    return {"scene_id": scene_id, "operation_id": operation_id, "requested_model": model}
 
 
 @app.post("/generate-worlds", tags=["Pipeline"], summary="Generate 3D worlds for all scenes",
@@ -426,13 +554,13 @@ async def generate_worlds(req: GenerateWorldsRequest):
     if not WORLD_LABS_API_KEY:
         raise HTTPException(500, "WORLD_LABS_API_KEY not configured")
 
-    # Cache key based on all marble prompts
-    key = _cache_key(*[s.marble_prompt for s in req.scenes])
+    model = req.model or DEFAULT_MARBLE_MODEL
+    asset_tier = req.asset_tier or DEFAULT_SPZ_TIER
+    key = _worlds_cache_key(req.scenes, model, asset_tier)
     cached = cache_get_json("worlds", key)
     if cached:
         return cached
 
-    model = req.model or "Marble 0.1-mini"
     async with httpx.AsyncClient(timeout=120.0) as client:
         tasks = [
             _generate_single_world(client, scene.id, scene.marble_prompt, model)
@@ -440,32 +568,24 @@ async def generate_worlds(req: GenerateWorldsRequest):
         ]
         results = await asyncio.gather(*tasks)
 
-    result = {"operations": results}
+    result = {"operations": results, "model": model, "asset_tier": asset_tier}
     cache_set_json("worlds", key, result)
     return result
 
 
 # ─── GET /poll-worlds ───
 
-def _extract_spz_url(data: dict) -> Optional[str]:
-    """Try multiple paths to find the SPZ URL in a Marble response."""
+def _extract_spz_urls(data: dict) -> dict[str, str]:
+    """Try multiple paths to find all SPZ URLs in a Marble response."""
     response = data.get("response") or data.get("result") or data
 
-    # Direct spz_url
     if isinstance(response, dict):
-        # Check assets.splats.spz_urls
         assets = response.get("assets", {})
         splats = assets.get("splats", {})
-        spz_urls = splats.get("spz_urls", {})
+        spz_urls = normalize_spz_urls(splats.get("spz_urls"))
         if spz_urls:
-            # Return the first available SPZ URL (highest quality)
-            for key in ["full", "500k", "100k"]:
-                if key in spz_urls:
-                    return spz_urls[key]
-            # Fallback: return any value
-            return next(iter(spz_urls.values()), None)
+            return spz_urls
 
-        # Legacy paths
         for path in ["spz_url", "world.spz_url", "output.spz_url"]:
             parts = path.split(".")
             obj = response
@@ -476,14 +596,85 @@ def _extract_spz_url(data: dict) -> Optional[str]:
                     obj = None
                     break
             if obj:
-                return obj
+                return {"legacy": obj}
 
-    return None
+    return {}
+
+
+async def _poll_operation_status(
+    client: httpx.AsyncClient,
+    operation_id: str,
+    selected_asset_tier: str,
+) -> dict:
+    response = await client.get(
+        f"{MARBLE_BASE}/operations/{operation_id}",
+        headers={"WLT-Api-Key": WORLD_LABS_API_KEY},
+    )
+    if response.status_code != 200:
+        return {
+            "operation_id": operation_id,
+            "status": "error",
+            "error": f"Poll error {response.status_code}",
+            "spz_url": None,
+        }
+
+    data = response.json()
+    if data.get("done") or data.get("status") == "SUCCEEDED":
+        world_id = _extract_world_id(data)
+        world = None
+        if world_id:
+            try:
+                world = await _fetch_world_metadata(client, world_id)
+            except Exception as e:
+                print(f"[poll-worlds] Failed to fetch world metadata for {world_id}: {e}")
+
+        if world:
+            metadata = _world_asset_metadata(world)
+            selected_spz_url, selected_spz_tier = select_spz_url(
+                metadata.get("spz_urls"),
+                selected_asset_tier,
+            )
+        else:
+            spz_urls = _extract_spz_urls(data)
+            selected_spz_url, selected_spz_tier = select_spz_url(spz_urls, selected_asset_tier)
+            metadata = {
+                "world_id": world_id,
+                "model": None,
+                "world_marble_url": None,
+                "thumbnail_url": None,
+                "pano_url": None,
+                "caption": None,
+                "world_prompt_text": None,
+                "spz_urls": spz_urls,
+                "collider_mesh_url": None,
+                "semantics": None,
+            }
+        return {
+            "operation_id": operation_id,
+            "status": "ready",
+            "spz_url": selected_spz_url,
+            "selected_spz_tier": selected_spz_tier,
+            **metadata,
+        }
+
+    if data.get("error") or data.get("status") == "FAILED":
+        return {
+            "operation_id": operation_id,
+            "status": "failed",
+            "error": str(data.get("error", "Generation failed")),
+            "spz_url": None,
+        }
+
+    return {
+        "operation_id": operation_id,
+        "status": "generating",
+        "spz_url": None,
+    }
 
 
 @app.get("/poll-worlds", tags=["Pipeline"], summary="Poll world generation status",
          description="Checks status of one or more Marble generation operations. Returns status and SPZ URLs for completed worlds.")
-async def poll_worlds(operation_ids: str):
+async def poll_worlds(operation_ids: str, asset_tier: Optional[str] = None):
     if not operation_ids.strip():
         raise HTTPException(400, "operation_ids query parameter is required")
     if not WORLD_LABS_API_KEY:
@@ -491,59 +682,16 @@ async def poll_worlds(operation_ids: str):
 
     ids = [oid.strip() for oid in operation_ids.split(",") if oid.strip()]
 
-    # Return cached result if all scenes were already done
-    key = _cache_key(*sorted(ids))
+    selected_asset_tier = asset_tier or DEFAULT_SPZ_TIER
+    key = _poll_cache_key(ids, selected_asset_tier)
     cached = cache_get_json("poll", key)
     if cached:
         return cached
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-
-        async def poll_one(operation_id: str) -> dict:
-            response = await client.get(
-                f"{MARBLE_BASE}/operations/{operation_id}",
-                headers={"WLT-Api-Key": WORLD_LABS_API_KEY},
-            )
-            if response.status_code != 200:
-                return {
-                    "operation_id": operation_id,
-                    "status": "error",
-                    "error": f"Poll error {response.status_code}",
-                    "spz_url": None,
-                }
-
-            data = response.json()
-
-            if data.get("done") or data.get("status") == "SUCCEEDED":
-                spz_url = _extract_spz_url(data)
-                # Extract collider mesh and semantics
-                resp = data.get("response") or data.get("result") or {}
-                assets = resp.get("assets", {}) if isinstance(resp, dict) else {}
-                mesh = assets.get("mesh", {}) or {}
-                splats = assets.get("splats", {}) or {}
-                return {
-                    "operation_id": operation_id,
-                    "status": "ready",
-                    "spz_url": spz_url,
-                    "collider_mesh_url": mesh.get("collider_mesh_url"),
-                    "semantics": splats.get("semantics_metadata"),
-                }
-
-            if data.get("error") or data.get("status") == "FAILED":
-                return {
-                    "operation_id": operation_id,
-                    "status": "failed",
-                    "error": str(data.get("error", "Generation failed")),
-                    "spz_url": None,
-                }
-
-            return {
-                "operation_id": operation_id,
-                "status": "generating",
-                "spz_url": None,
-            }
-
-        results = await asyncio.gather(*[poll_one(oid) for oid in ids])
+        results = await asyncio.gather(
+            *[_poll_operation_status(client, oid, selected_asset_tier) for oid in ids]
+        )
 
     result = {"scenes": results}
     # Only cache when all scenes are done (ready or failed)
@@ -557,12 +705,7 @@ async def poll_worlds(operation_ids: str):
 
 _active_pipelines: dict[str, asyncio.Task] = {}
 
-
-class CreateGenerationRequest(BaseModel):
-    text: str
-
-
-async def _run_pipeline(gen_id: str, text: str):
+async def _run_pipeline(gen_id: str, text: str, model: str, asset_tier: str):
     """Run the full extract → speech → worlds → poll pipeline as a background task."""
     try:
         # Step 1: Extract scenes
@@ -604,17 +747,17 @@ async def _run_pipeline(gen_id: str, text: str):
 
         # Build worlds task
         async def _build_worlds():
-            worlds_key = _cache_key(*[s["marble_prompt"] for s in scenes])
+            worlds_key = _worlds_cache_key(scenes, model, asset_tier)
             cached_worlds = cache_get_json("worlds", worlds_key)
             if cached_worlds:
                 return cached_worlds["operations"]
             async with httpx.AsyncClient(timeout=120.0) as client:
                 tasks = [
-                    _generate_single_world(client, s["id"], s["marble_prompt"], "Marble 0.1-mini")
+                    _generate_single_world(client, s["id"], s["marble_prompt"], model)
                     for s in scenes
                 ]
                 ops = await asyncio.gather(*tasks)
-            cache_set_json("worlds", worlds_key, {"operations": list(ops)})
+            cache_set_json("worlds", worlds_key, {"operations": list(ops), "model": model, "asset_tier": asset_tier})
             return list(ops)
 
         # Build BGM task (all scenes in parallel)
@@ -641,38 +784,16 @@ async def _run_pipeline(gen_id: str, text: str):
         # Step 4: Poll until all worlds ready
         max_attempts = 120
         for attempt in range(max_attempts):
-            poll_key = _cache_key(*sorted(op_ids))
+            poll_key = _poll_cache_key(op_ids, asset_tier)
             cached_poll = cache_get_json("poll", poll_key)
 
             if cached_poll:
                 poll_results = cached_poll["scenes"]
             else:
                 async with httpx.AsyncClient(timeout=30.0) as client:
-                    async def poll_one(operation_id: str) -> dict:
-                        response = await client.get(
-                            f"{MARBLE_BASE}/operations/{operation_id}",
-                            headers={"WLT-Api-Key": WORLD_LABS_API_KEY},
-                        )
-                        if response.status_code != 200:
-                            return {"operation_id": operation_id, "status": "error", "spz_url": None}
-                        data = response.json()
-                        if data.get("done") or data.get("status") == "SUCCEEDED":
-                            spz_url = _extract_spz_url(data)
-                            resp_data = data.get("response") or data.get("result") or {}
-                            assets = resp_data.get("assets", {}) if isinstance(resp_data, dict) else {}
-                            mesh = assets.get("mesh", {}) or {}
-                            splats = assets.get("splats", {}) or {}
-                            return {
-                                "operation_id": operation_id, "status": "ready",
-                                "spz_url": spz_url,
-                                "collider_mesh_url": mesh.get("collider_mesh_url"),
-                                "semantics": splats.get("semantics_metadata"),
-                            }
-                        if data.get("error") or data.get("status") == "FAILED":
-                            return {"operation_id": operation_id, "status": "failed", "spz_url": None}
-                        return {"operation_id": operation_id, "status": "generating", "spz_url": None}
-
-                    poll_results = await asyncio.gather(*[poll_one(oid) for oid in op_ids])
+                    poll_results = await asyncio.gather(
+                        *[_poll_operation_status(client, oid, asset_tier) for oid in op_ids]
+                    )
                     poll_results = list(poll_results)
 
             all_done = all(r["status"] in ("ready", "failed", "error") for r in poll_results)
@@ -683,14 +804,25 @@ async def _run_pipeline(gen_id: str, text: str):
                     scene_id = op_to_scene.get(pr["operation_id"])
                     for s in scenes:
                         if s["id"] == scene_id:
-                            s["spz_url"] = pr["spz_url"]
-                            s["collider_mesh_url"] = pr.get("collider_mesh_url")
-                            s["semantics"] = pr.get("semantics")
+                            s.update({
+                                "spz_url": pr.get("spz_url"),
+                                "selected_spz_tier": pr.get("selected_spz_tier"),
+                                "spz_urls": pr.get("spz_urls"),
+                                "collider_mesh_url": pr.get("collider_mesh_url"),
+                                "semantics": pr.get("semantics"),
+                                "world_id": pr.get("world_id"),
+                                "model": pr.get("model") or model,
+                                "world_marble_url": pr.get("world_marble_url"),
+                                "thumbnail_url": pr.get("thumbnail_url"),
+                                "pano_url": pr.get("pano_url"),
+                                "caption": pr.get("caption"),
+                                "world_prompt_text": pr.get("world_prompt_text"),
+                            })
 
             update_generation(gen_id, scenes=scenes)
 
             if all_done:
-                cache_set_json("poll", _cache_key(*sorted(op_ids)), {"scenes": poll_results})
+                cache_set_json("poll", poll_key, {"scenes": poll_results})
                 break
 
             await asyncio.sleep(5)
@@ -711,9 +843,11 @@ async def _run_pipeline(gen_id: str, text: str):
 async def create_generation_endpoint(req: CreateGenerationRequest):
     if not req.text.strip():
         raise HTTPException(400, "Text is required")
+    model = req.model or DEFAULT_MARBLE_MODEL
+    asset_tier = req.asset_tier or DEFAULT_SPZ_TIER
     gen_id = uuid.uuid4().hex[:12]
-    create_generation(gen_id, req.text.strip())
-    task = asyncio.create_task(_run_pipeline(gen_id, req.text.strip()))
+    create_generation(gen_id, req.text.strip(), marble_model=model, asset_tier=asset_tier)
+    task = asyncio.create_task(_run_pipeline(gen_id, req.text.strip(), model, asset_tier))
     _active_pipelines[gen_id] = task
     return {"id": gen_id}
 
@@ -730,7 +864,36 @@ async def get_generation_endpoint(gen_id: str):
     gen = get_generation(gen_id)
     if not gen:
         raise HTTPException(404, "Generation not found")
-    return gen
+    return _augment_generation_for_diagnostics(gen)
+
+
+@app.get("/diagnostics/generations", tags=["Diagnostics"], summary="List diagnostics generations",
+         description="Returns completed generations with diagnostics summary counts.")
+async def list_diagnostics_generations(limit: int = 25, completed_only: bool = True):
+    return list_generation_diagnostics(limit=limit, completed_only=completed_only)
+
+
+@app.get("/diagnostics/generations/{gen_id}", tags=["Diagnostics"], summary="Get diagnostics details",
+         description="Returns a generation with prompt analysis and scene diagnostics records.")
+async def get_diagnostics_generation(gen_id: str):
+    gen = get_generation(gen_id)
+    if not gen:
+        raise HTTPException(404, "Generation not found")
+    return _augment_generation_for_diagnostics(gen)
+
+
+@app.put("/diagnostics/generations/{gen_id}/scenes/{scene_id}", tags=["Diagnostics"], summary="Update scene diagnostics",
+         description="Stores manual diagnostics annotations for a single scene.")
+async def update_scene_diagnostics(gen_id: str, scene_id: str, req: DiagnosticUpdateRequest):
+    gen = get_generation(gen_id)
+    if not gen:
+        raise HTTPException(404, "Generation not found")
+    if not any(scene.get("id") == scene_id for scene in gen.get("scenes", [])):
+        raise HTTPException(404, "Scene not found")
+
+    fields = {key: value for key, value in req.model_dump().items() if value is not None}
+    record = upsert_scene_diagnostic(gen_id, scene_id, **fields)
+    return record
 
 
 @app.get("/generations/{gen_id}/audio", tags=["Generations"], summary="Get generation audio",

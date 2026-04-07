@@ -1,4 +1,4 @@
-"""SQLite persistence for Echo generations."""
+"""SQLite persistence for Echo generations and diagnostics."""
 
 import json
 import sqlite3
@@ -43,6 +43,22 @@ def init_db():
             updated_at      TEXT NOT NULL
         )
     """)
+    _ensure_column(conn, "generations", "marble_model", "TEXT")
+    _ensure_column(conn, "generations", "asset_tier", "TEXT")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scene_diagnostics (
+            generation_id           TEXT NOT NULL,
+            scene_id                TEXT NOT NULL,
+            classification          TEXT,
+            viewer_mode             TEXT,
+            asset_tier              TEXT,
+            echo_screenshot_url     TEXT,
+            reference_screenshot_url TEXT,
+            notes                   TEXT,
+            updated_at              TEXT NOT NULL,
+            PRIMARY KEY (generation_id, scene_id)
+        )
+    """)
     conn.commit()
     # Mark any stuck generations as failed on startup
     conn.execute("""
@@ -57,12 +73,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_generation(gen_id: str, input_text: str) -> dict:
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str):
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def create_generation(
+    gen_id: str,
+    input_text: str,
+    marble_model: Optional[str] = None,
+    asset_tier: Optional[str] = None,
+) -> dict:
     conn = _get_conn()
     now = _now()
     conn.execute(
-        "INSERT INTO generations (id, status, input_text, created_at, updated_at) VALUES (?, 'pending', ?, ?, ?)",
-        (gen_id, input_text, now, now),
+        """
+        INSERT INTO generations (id, status, input_text, marble_model, asset_tier, created_at, updated_at)
+        VALUES (?, 'pending', ?, ?, ?, ?, ?)
+        """,
+        (gen_id, input_text, marble_model, asset_tier, now, now),
     )
     conn.commit()
     return get_generation(gen_id)
@@ -97,7 +127,7 @@ def update_generation(gen_id: str, **fields):
 def list_generations() -> list[dict]:
     conn = _get_conn()
     rows = conn.execute("""
-        SELECT id, status, title, created_at, updated_at,
+        SELECT id, status, title, marble_model, asset_tier, created_at, updated_at,
                CASE WHEN scenes_json IS NOT NULL
                     THEN json_array_length(scenes_json)
                     ELSE 0 END as scene_count
@@ -105,3 +135,71 @@ def list_generations() -> list[dict]:
         ORDER BY created_at DESC
     """).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_scene_diagnostics(generation_id: str) -> dict[str, dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT generation_id, scene_id, classification, viewer_mode, asset_tier,
+               echo_screenshot_url, reference_screenshot_url, notes, updated_at
+        FROM scene_diagnostics
+        WHERE generation_id = ?
+        """,
+        (generation_id,),
+    ).fetchall()
+    return {row["scene_id"]: dict(row) for row in rows}
+
+
+def upsert_scene_diagnostic(generation_id: str, scene_id: str, **fields) -> dict:
+    conn = _get_conn()
+    fields["updated_at"] = _now()
+    existing = conn.execute(
+        "SELECT * FROM scene_diagnostics WHERE generation_id = ? AND scene_id = ?",
+        (generation_id, scene_id),
+    ).fetchone()
+
+    if existing:
+        sets = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(
+            f"UPDATE scene_diagnostics SET {sets} WHERE generation_id = ? AND scene_id = ?",
+            list(fields.values()) + [generation_id, scene_id],
+        )
+    else:
+        columns = ["generation_id", "scene_id", *fields.keys()]
+        placeholders = ", ".join("?" for _ in columns)
+        conn.execute(
+            f"INSERT INTO scene_diagnostics ({', '.join(columns)}) VALUES ({placeholders})",
+            [generation_id, scene_id, *fields.values()],
+        )
+    conn.commit()
+    return get_scene_diagnostics(generation_id).get(scene_id, {})
+
+
+def list_generation_diagnostics(limit: int = 25, completed_only: bool = True) -> list[dict]:
+    generations = list_generations()
+    if completed_only:
+        generations = [gen for gen in generations if gen["status"] == "completed"]
+    generations = generations[:limit]
+
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT generation_id, classification, COUNT(*) as count
+        FROM scene_diagnostics
+        GROUP BY generation_id, classification
+        """
+    ).fetchall()
+    counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        generation_id = row["generation_id"]
+        classification = row["classification"] or "unclassified"
+        counts.setdefault(generation_id, {})[classification] = row["count"]
+
+    for generation in generations:
+        classification_counts = counts.get(generation["id"], {})
+        generation["classification_counts"] = classification_counts
+        generation["classified_count"] = sum(
+            count for key, count in classification_counts.items() if key != "unclassified"
+        )
+    return generations
